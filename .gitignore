@@ -1,0 +1,5 @@
+panel.json
+panel.json.tmp
+node_modules/
+research/
+.keil-runtime.json
