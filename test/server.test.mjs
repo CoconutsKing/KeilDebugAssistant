@@ -39,6 +39,7 @@ test('demo array/class browsing, selected member writes, and stop script closes 
   const saved=JSON.parse(await readFile(join(dir,'panel.json'),'utf8'));assert.equal(saved.defaults.step,0.25);assert.ok(saved.excluded.includes('controllers[2].gain'));
   assert.equal(saved.writeHistory.demo['pid.kp'].current,3);assert.equal(saved.writeHistory.demo['pid.kp'].selected,'previous');
   const layout={mode:'free',widgets:{pid:{x:32,y:48,width:480,height:420}}};result=await post('layout',{layout});assert.deepEqual(result.layout,layout);assert.deepEqual(JSON.parse(await readFile(join(dir,'panel.json'),'utf8')).layout,layout);
+  result=await post('items',{items:[{name:'board',min:0,max:10,step:0.1,pinned:true}],rename:{from:'pid',to:'board'}});assert.equal(result.items[0].name,'board');assert.deepEqual(result.layout.widgets.board,layout.widgets.pid);assert.ok(!result.layout.widgets.pid);assert.ok(!result.items[0].members);
   const project=join(dir,'fixture.uvoptx');await (await import('node:fs/promises')).writeFile(project,'<WatchWindow1><ItemText>pid.kp</ItemText></WatchWindow1>');
   await post('project',{path:project});await post('items',{items:[{name:'pid'}]});await (await import('node:fs/promises')).writeFile(project,'<WatchWindow1>\n<ItemText>pid.kp</ItemText>\n</WatchWindow1>');await new Promise(r=>setTimeout(r,600));
   assert.ok(!(await (await fetch(base+'/api/state')).json()).items.some(v=>v.name==='pid.kp'));

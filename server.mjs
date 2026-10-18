@@ -118,7 +118,15 @@ const server=http.createServer(async(req,res)=>{
             members=result.map(v=>({...v,name:memberPath(b.name,{...v,parentPointer:parent.pointer}),expandable:!!(v.count||v.aggregate||v.array||v.pointer)}));
           }
           res.setHeader('Content-Type','application/json');res.end(JSON.stringify({...snapshot(),members,total,offset,nextOffset:parent.array&&offset+members.length<total?offset+members.length:null}));return;
-        }else if(path==='/api/items'){const next=b.items;if(!Array.isArray(next)||next.length>500)throw Error('最多 500 个变量');const checked=next.map(validateItem);if(new Set(checked.map(v=>v.name)).size!==checked.length)throw Error('变量名重复');if(b.remember){const d=validateItem({name:'defaults',...b.remember});defaults={min:d.min,max:d.max,step:d.step,pinned:d.pinned};}for(const old of items)if(!checked.some(v=>v.name===old.name))excluded.add(old.name);for(const item of checked)excluded.delete(item.name);items=checked;}
+        }else if(path==='/api/items'){
+          const next=b.items;if(!Array.isArray(next)||next.length>500)throw Error('最多 500 个变量');
+          const checked=next.map(validateItem);if(new Set(checked.map(v=>v.name)).size!==checked.length)throw Error('变量名重复');
+          if(b.rename){const {from,to}=b.rename;if(!validName(from)||!validName(to)||from===to||!items.some(v=>v.name===from)||checked.some(v=>v.name===from)||!checked.some(v=>v.name===to)||items.some(v=>v.name===to))throw Error('替换变量请求无效');}
+          const remembered=b.remember?validateItem({name:'defaults',...b.remember}):null;
+          if(b.rename){const {from,to}=b.rename;if(layout.widgets[from]){layout.widgets[to]={...layout.widgets[from]};delete layout.widgets[from];}activeRoots=activeRoots.map(name=>name===from?to:name);}
+          if(remembered)defaults={min:remembered.min,max:remembered.max,step:remembered.step,pinned:remembered.pinned};
+          for(const old of items)if(!checked.some(v=>v.name===old.name))excluded.add(old.name);for(const item of checked)excluded.delete(item.name);items=checked;
+        }
         else if(path==='/api/project'){if(typeof b.path!=='string'||!b.path.toLowerCase().endsWith('.uvoptx'))throw Error('请选择 .uvoptx 文件');await readFile(b.path,'utf8');projectPath=b.path;lastXml='';catalog=null;await syncProject();await refreshCatalog(true);}
         else if(path==='/api/write'||path==='/api/toggle'){
           const rootItem=items.find(v=>v.name===(b.root||b.name));const allowed=rootItem&&(rootItem.name===b.name||planFor(rootItem.name).rows.some(row=>row.name===b.name));if(!allowed)throw Error('该变量不属于当前调参面板');const item={...rootItem,...rootItem.members?.[b.name]},v=values.get(b.name);if(!v?.editable||!v.updated)throw Error('变量未就绪或不可写');
@@ -133,13 +141,10 @@ const server=http.createServer(async(req,res)=>{
         await save();res.setHeader('Content-Type','application/json');res.end(JSON.stringify(snapshot()));
       }finally{busy=false;}return;
     }
-    const files={'/':'index.html','/app.js':'app.js','/controls.js':'controls.js','/layout.js':'layout.js','/style.css':'style.css'};if(req.method!=='GET'||!files[path]){res.writeHead(404);return res.end();}
+    const files={'/':'index.html','/app.js':'app.js','/controls.js':'controls.js','/layout.js':'layout.js','/editor.js':'editor.js','/style.css':'style.css'};if(req.method!=='GET'||!files[path]){res.writeHead(404);return res.end();}
     res.setHeader('Content-Type',path.endsWith('.js')?'text/javascript':path.endsWith('.css')?'text/css':'text/html; charset=utf-8');res.end(await readFile(new URL('public/'+files[path],root)));
   }catch(e){if(e.variableName&&e.actual)values.set(e.variableName,{...e.actual,updated:Date.now()});res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:e.message}));}
 });
 async function shutdown(){if(shuttingDown)return;shuttingDown=true;client?.close();server.close();try{const saved=JSON.parse(await readFile(runtime,'utf8'));if(saved.token===shutdownToken)await unlink(runtime);}catch{}console.log('Keil Debug Assistant stopped.');}
 process.on('SIGINT',()=>void shutdown());process.on('SIGTERM',()=>void shutdown());
 server.listen(Number(process.env.PORT||3210),'127.0.0.1',async()=>{await writeFile(runtime,JSON.stringify({port:server.address().port,token:shutdownToken,pid:process.pid}));console.log(`Keil Debug Assistant: http://127.0.0.1:${server.address().port}`);poll();});
-
-
-
