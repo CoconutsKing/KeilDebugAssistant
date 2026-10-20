@@ -9,6 +9,7 @@ import {loadCatalog} from './lib/catalog.mjs';
 import {flattenGroup} from './lib/groups.mjs';
 import {validateLayout} from './lib/layout.mjs';
 import {validHistory,recordInput,toggleTarget} from './lib/history.mjs';
+import {isIntegerVariable} from './public/format.js';
 import {validateItem,validateWrite,watchNames,validName,memberPath} from './lib/model.mjs';
 const root=new URL('./',import.meta.url),home=new URL('../',root),userRoot=process.env.KDA_USER_DIR?pathToFileURL(resolve(process.env.KDA_USER_DIR)+'/'):new URL('userdata/',home),dataRoot=process.env.KDA_DATA_DIR?pathToFileURL(resolve(process.env.KDA_DATA_DIR)+'/'):new URL('data/',home),config=new URL('panel.json',userRoot);
 await mkdir(userRoot,{recursive:true});await mkdir(dataRoot,{recursive:true});
@@ -65,7 +66,7 @@ async function poll(){if(shuttingDown)return;if(busy){setTimeout(poll,interval);
   }
 }catch(e){lastError=e.message;status='error';}finally{busy=false;setTimeout(poll,interval);}}
 let keilPort=4823;
-function snapshot(){return {version:'2.0.3',preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name);return {...v,...values.get(v.name),...(plan.rows.length?{...((mode==='demo'?demoRead(v.name):catalog?.describe(v.name))||{}),value:'',editable:false,children:plan.rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),truncated:plan.truncated}:{}),name:v.name,history:historyFor(v.name)};})};}
+function snapshot(){return {version:'2.0.4',preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name);return {...v,...values.get(v.name),...(plan.rows.length?{...((mode==='demo'?demoRead(v.name):catalog?.describe(v.name))||{}),value:'',editable:false,children:plan.rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),truncated:plan.truncated}:{}),name:v.name,history:historyFor(v.name)};})};}
 async function body(req){let data='';for await(const chunk of req){data+=chunk;if(data.length>1024*1024)throw Error('请求过大');}return JSON.parse(data||'{}');}
 const server=http.createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');
@@ -84,7 +85,7 @@ const server=http.createServer(async(req,res)=>{
       }
       if(busy){interactionRequested=true;res.writeHead(409);return res.end(JSON.stringify({error:'正在采样，请稍后重试'}));}busy=true;interactionRequested=false;
       try{
-        if(['/api/items','/api/layout','/api/priority','/api/project','/api/write','/api/toggle'].includes(path)&&b.sessionId!==sessionId)throw Error('调试会话已切换，请等待界面刷新后重试');
+        if(['/api/items','/api/layout','/api/priority','/api/project','/api/write','/api/toggle','/api/display'].includes(path)&&b.sessionId!==sessionId)throw Error('调试会话已切换，请等待界面刷新后重试');
         if(path==='/api/connect'){
           if(!['demo','keil','disconnected'].includes(b.mode))throw Error('无效模式');
           if(b.mode==='keil'&&(!Number.isInteger(b.port)||b.port<1||b.port>65535))throw Error('端口无效');
@@ -100,6 +101,14 @@ const server=http.createServer(async(req,res)=>{
           if(mode==='disconnected')status='disconnected';
         }else if(path==='/api/sessions'){await pool.refresh(Number(b.port)||keilPort,true);
         }else if(path==='/api/preferences'){prefs=validatePreferences({...prefs,...b.preferences});
+        }else if(path==='/api/display'){
+          if(typeof b.hex!=='boolean')throw Error('十六进制显示设置无效');
+          const item=items.find(v=>v.name===b.root);
+          if(!item||!(item.name===b.name||planFor(item.name).rows.some(row=>row.name===b.name)))throw Error('该变量不属于当前调参面板');
+          const meta=mode==='demo'?demoRead(b.name):{...values.get(b.name),...catalog?.describe(b.name)};
+          if(!isIntegerVariable(meta))throw Error('仅整型变量支持十六进制显示');
+          const next=item.name===b.name?{...item,hex:b.hex}:{...item,members:{...item.members,[b.name]:{...item.members?.[b.name],hex:b.hex}}};
+          items=items.map(v=>v===item?validateItem(next):v);
         }else if(path==='/api/layout'){
           layout=validateLayout(b.layout);
         }else if(path==='/api/priority'){
@@ -162,7 +171,7 @@ const server=http.createServer(async(req,res)=>{
         if(!['/api/priority','/api/sessions'].includes(path))await save();res.setHeader('Content-Type','application/json');res.end(JSON.stringify(snapshot()));
       }finally{busy=false;}return;
     }
-    const files={'/':'index.html','/app.js':'app.js','/controls.js':'controls.js','/layout.js':'layout.js','/editor.js':'editor.js','/search.js':'search.js','/style.css':'style.css','/keil.ico':'keil.ico','/preferences.js':'preferences.js','/session-picker.js':'session-picker.js'};if(req.method!=='GET'||!files[path]){res.writeHead(404);return res.end();}
+    const files={'/':'index.html','/app.js':'app.js','/controls.js':'controls.js','/format.js':'format.js','/layout.js':'layout.js','/editor.js':'editor.js','/search.js':'search.js','/style.css':'style.css','/keil.ico':'keil.ico','/preferences.js':'preferences.js','/session-picker.js':'session-picker.js'};if(req.method!=='GET'||!files[path]){res.writeHead(404);return res.end();}
     res.setHeader('Content-Type',path.endsWith('.ico')?'image/x-icon':path.endsWith('.js')?'text/javascript':path.endsWith('.css')?'text/css':'text/html; charset=utf-8');res.end(await readFile(new URL('public/'+files[path],root)));
   }catch(e){if(e.variableName&&e.actual)values.set(e.variableName,{...e.actual,updated:Date.now()});res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:e.message}));}
 });
