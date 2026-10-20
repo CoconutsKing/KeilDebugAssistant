@@ -54,7 +54,7 @@ async function syncProject(){if(!projectPath)return;const xml=await readFile(pro
 async function sample(name){try{const value=mode==='demo'?demoRead(name):await readLive(name);values.set(name,{...value,updated:Date.now()});}catch(e){values.set(name,{...values.get(name),error:e.message,editable:false});if(mode==='keil'&&client?.socket?.destroyed){client=null;throw e;}}}
 async function samplePanel(){const active=items.filter(item=>activeRoots.includes(item.name));const selected=active.length&&++sampleRound%10!==0?active:items;const names=[...new Set(selected.flatMap(item=>{const plan=planFor(item.name);return plan.rows.length?plan.rows.map(v=>v.name):[item.name];}))];if(!names.length)return;const budget=mode==='demo'?names.length:8;for(let i=0;i<Math.min(budget,names.length);i++){sampleCursor%=names.length;await sample(names[sampleCursor++]);if(interactionRequested)break;}}
 async function poll(){if(shuttingDown)return;if(busy){setTimeout(poll,interval);return;}busy=true;try{
-  if(mode!=='keil')await syncProject();
+  pool.applyDiscovered(null);if(mode!=='keil')await syncProject();
   if(mode==='demo'){status='demo';await samplePanel();lastError='';}
   else if(mode==='keil'){
     const sessions=await pool.refresh(keilPort);if(selection==='auto'&&!pool.hasDiscovered){status='connecting';lastError='正在后台识别 Keil 窗口…';return;}const selected=chooseSession(sessions,sessionInfo?.port,selection);
@@ -65,7 +65,7 @@ async function poll(){if(shuttingDown)return;if(busy){setTimeout(poll,interval);
   }
 }catch(e){lastError=e.message;status='error';}finally{busy=false;setTimeout(poll,interval);}}
 let keilPort=4823;
-function snapshot(){return {version:'2.0.1',preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name);return {...v,...values.get(v.name),...(plan.rows.length?{...((mode==='demo'?demoRead(v.name):catalog?.describe(v.name))||{}),value:'',editable:false,children:plan.rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),truncated:plan.truncated}:{}),name:v.name,history:historyFor(v.name)};})};}
+function snapshot(){return {version:'2.0.2',preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name);return {...v,...values.get(v.name),...(plan.rows.length?{...((mode==='demo'?demoRead(v.name):catalog?.describe(v.name))||{}),value:'',editable:false,children:plan.rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),truncated:plan.truncated}:{}),name:v.name,history:historyFor(v.name)};})};}
 async function body(req){let data='';for await(const chunk of req){data+=chunk;if(data.length>1024*1024)throw Error('请求过大');}return JSON.parse(data||'{}');}
 const server=http.createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');
@@ -88,7 +88,14 @@ const server=http.createServer(async(req,res)=>{
         if(path==='/api/connect'){
           if(!['demo','keil','disconnected'].includes(b.mode))throw Error('无效模式');
           if(b.mode==='keil'&&(!Number.isInteger(b.port)||b.port<1||b.port>65535))throw Error('端口无效');
-          pool.close();client=null;sessionInfo=null;sessionId=randomUUID();values.clear();if(sessionKey)profiles[sessionKey]=panelData();mode=b.mode;status='connecting';lastError='';keilPort=b.port||4823;selection=b.selection==='auto'||b.selection===undefined?'auto':String(b.port);pool.scanned=0;if(mode==='demo'&&sessionKey!=='demo'){applyPanel(profiles.demo);sessionKey='demo';}
+          if(sessionKey)profiles[sessionKey]=panelData();mode=b.mode;lastError='';keilPort=b.port||4823;selection=b.selection==='auto'||b.selection===undefined?'auto':String(b.port);
+          if(mode==='keil'){
+            pool.applyDiscovered(keilPort);const chosen=chooseSession(pool.sessions,sessionInfo?.port,selection);
+            if(chosen){await activateSession(chosen);status=['running','halted','waiting'].includes(chosen.status)?chosen.status:'connecting';}
+            else{client=null;sessionInfo=null;sessionId=randomUUID();values.clear();status='connecting';}
+            void pool.scan();
+          }else{pool.close();client=null;sessionInfo=null;sessionId=randomUUID();values.clear();status='connecting';}
+          if(mode==='demo'&&sessionKey!=='demo'){applyPanel(profiles.demo);sessionKey='demo';}
           if(mode==='demo'&&!items.length)items=Object.keys(demo).map(name=>validateItem({name,min:0,max:name.includes('rpm')?5000:name.includes('enabled')?1:100,step:name.includes('pid')?0.01:1,pinned:name!=='motor.actual_rpm'}));
           if(mode==='disconnected')status='disconnected';
         }else if(path==='/api/sessions'){await pool.refresh(Number(b.port)||keilPort,true);
@@ -155,11 +162,11 @@ const server=http.createServer(async(req,res)=>{
         if(!['/api/priority','/api/sessions'].includes(path))await save();res.setHeader('Content-Type','application/json');res.end(JSON.stringify(snapshot()));
       }finally{busy=false;}return;
     }
-    const files={'/':'index.html','/app.js':'app.js','/controls.js':'controls.js','/layout.js':'layout.js','/editor.js':'editor.js','/search.js':'search.js','/style.css':'style.css','/keil.ico':'keil.ico','/preferences.js':'preferences.js'};if(req.method!=='GET'||!files[path]){res.writeHead(404);return res.end();}
+    const files={'/':'index.html','/app.js':'app.js','/controls.js':'controls.js','/layout.js':'layout.js','/editor.js':'editor.js','/search.js':'search.js','/style.css':'style.css','/keil.ico':'keil.ico','/preferences.js':'preferences.js','/session-picker.js':'session-picker.js'};if(req.method!=='GET'||!files[path]){res.writeHead(404);return res.end();}
     res.setHeader('Content-Type',path.endsWith('.ico')?'image/x-icon':path.endsWith('.js')?'text/javascript':path.endsWith('.css')?'text/css':'text/html; charset=utf-8');res.end(await readFile(new URL('public/'+files[path],root)));
   }catch(e){if(e.variableName&&e.actual)values.set(e.variableName,{...e.actual,updated:Date.now()});res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:e.message}));}
 });
 async function shutdown(){if(shuttingDown)return;shuttingDown=true;pool.close();server.close();try{const saved=JSON.parse(await readFile(runtime,'utf8'));if(saved.token===shutdownToken)await unlink(runtime);}catch{}console.log('Keil Debug Assistant stopped.');}
 process.on('SIGINT',()=>void shutdown());process.on('SIGTERM',()=>void shutdown());
 export {server};
-server.listen(Number(process.env.PORT||3210),'127.0.0.1',async()=>{await writeFile(runtime,JSON.stringify({port:server.address().port,token:shutdownToken,pid:process.pid}));console.log(`Keil Debug Assistant: http://127.0.0.1:${server.address().port}`);poll();});
+server.listen(Number(process.env.PORT||3210),'127.0.0.1',async()=>{await writeFile(runtime,JSON.stringify({port:server.address().port,token:shutdownToken,pid:process.pid}));console.log(`Keil Debug Assistant: http://127.0.0.1:${server.address().port}`);void pool.scan();poll();});
