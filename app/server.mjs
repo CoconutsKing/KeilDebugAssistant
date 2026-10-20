@@ -6,7 +6,7 @@ import {pathToFileURL} from 'node:url';
 import {resolve} from 'node:path';
 import {preferences as validatePreferences} from './lib/preferences.mjs';
 import {loadCatalog} from './lib/catalog.mjs';
-import {flattenGroup} from './lib/groups.mjs';
+import {flattenGroup,selectedRows} from './lib/groups.mjs';
 import {validateLayout} from './lib/layout.mjs';
 import {validHistory,recordInput,toggleTarget} from './lib/history.mjs';
 import {isIntegerVariable} from './public/format.js';
@@ -27,6 +27,8 @@ function historyFor(name){const history=writeHistory[historyScope()]?.[name];ret
 function rememberHistory(name,history){if(!validHistory(history))return;const scope=historyScope();if(!Object.hasOwn(writeHistory,scope))writeHistory[scope]={};Object.defineProperty(writeHistory[scope],name,{value:history,writable:true,enumerable:true,configurable:true});}
 function demoChildren(name){const value=demoRead(name);if(value.array)return Array.from({length:value.count},(_,i)=>({name:`${name}[${i}]`}));const keys={motor:['target_rpm','actual_rpm','enabled'],pid:['kp','ki'],board:['temperature']};return (keys[name]||(/^controllers\[[0-3]\]$/.test(name)?['gain','enabled']:[])).map(key=>({name:name+'.'+key}));}
 function planFor(name){const key=(mode==='demo'?'demo':catalog?.key||'')+':'+name;if(groupPlans.has(key))return groupPlans.get(key);const describe=mode==='demo'?path=>{try{return demoRead(path);}catch{return null;}}:path=>catalog?.describe(path);const children=mode==='demo'?demoChildren:path=>{const all=[];let offset=0;do{const page=catalog?.children(path,offset);if(!page)break;all.push(...page.members);offset=page.nextOffset;}while(offset!==null&&all.length<513);return all;};const result=flattenGroup(name,describe,children);groupPlans.set(key,result);return result;}
+function rowsFor(item){return selectedRows(planFor(item.name),item.visibleMembers);}
+function containsMember(item,name){return item&&(item.name===name||rowsFor(item).some(row=>row.name===name));}
 async function refreshCatalog(force=false){if(!projectPath)return;if(!force&&Date.now()-catalogChecked<5000)return;catalogChecked=Date.now();try{catalog=await loadCatalog(projectPath);catalogError='';}catch(e){catalog=null;catalogError=e.message;}}
 async function readLive(name){
  const meta=catalog?.describe(name);
@@ -53,7 +55,7 @@ function demoRead(name){
 }
 async function syncProject(){if(!projectPath)return;const xml=await readFile(projectPath,'utf8');if(xml===lastXml)return;lastXml=xml;for(const name of watchNames(xml))if(!excluded.has(name)&&!items.some(v=>v.name===name))items.push(validateItem({name}));await save();}
 async function sample(name){try{const value=mode==='demo'?demoRead(name):await readLive(name);values.set(name,{...value,updated:Date.now()});}catch(e){values.set(name,{...values.get(name),error:e.message,editable:false});if(mode==='keil'&&client?.socket?.destroyed){client=null;throw e;}}}
-async function samplePanel(){const active=items.filter(item=>activeRoots.includes(item.name));const selected=active.length&&++sampleRound%10!==0?active:items;const names=[...new Set(selected.flatMap(item=>{const plan=planFor(item.name);return plan.rows.length?plan.rows.map(v=>v.name):[item.name];}))];if(!names.length)return;const budget=mode==='demo'?names.length:8;for(let i=0;i<Math.min(budget,names.length);i++){sampleCursor%=names.length;await sample(names[sampleCursor++]);if(interactionRequested)break;}}
+async function samplePanel(){const active=items.filter(item=>activeRoots.includes(item.name));const selected=active.length&&++sampleRound%10!==0?active:items;const names=[...new Set(selected.flatMap(item=>planFor(item.name).group?rowsFor(item).map(v=>v.name):[item.name]))];if(!names.length)return;const budget=mode==='demo'?names.length:8;for(let i=0;i<Math.min(budget,names.length);i++){sampleCursor%=names.length;await sample(names[sampleCursor++]);if(interactionRequested)break;}}
 async function poll(){if(shuttingDown)return;if(busy){setTimeout(poll,interval);return;}busy=true;try{
   pool.applyDiscovered(null);if(mode!=='keil')await syncProject();
   if(mode==='demo'){status='demo';await samplePanel();lastError='';}
@@ -66,7 +68,7 @@ async function poll(){if(shuttingDown)return;if(busy){setTimeout(poll,interval);
   }
 }catch(e){lastError=e.message;status='error';}finally{busy=false;setTimeout(poll,interval);}}
 let keilPort=4823;
-function snapshot(){return {version:'2.0.4',preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name);return {...v,...values.get(v.name),...(plan.rows.length?{...((mode==='demo'?demoRead(v.name):catalog?.describe(v.name))||{}),value:'',editable:false,children:plan.rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),truncated:plan.truncated}:{}),name:v.name,history:historyFor(v.name)};})};}
+function snapshot(){return {version:'2.0.5',preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name),rows=rowsFor(v);return {...v,...values.get(v.name),...(plan.group?{...((mode==='demo'?demoRead(v.name):catalog?.describe(v.name))||{}),value:'',editable:false,children:rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),totalMembers:plan.rows.length,missingMembers:v.visibleMembers?.filter(name=>!rows.some(row=>row.name===name))||[],truncated:plan.truncated}:{}),name:v.name,history:historyFor(v.name)};})};}
 async function body(req){let data='';for await(const chunk of req){data+=chunk;if(data.length>1024*1024)throw Error('请求过大');}return JSON.parse(data||'{}');}
 const server=http.createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');
@@ -85,7 +87,7 @@ const server=http.createServer(async(req,res)=>{
       }
       if(busy){interactionRequested=true;res.writeHead(409);return res.end(JSON.stringify({error:'正在采样，请稍后重试'}));}busy=true;interactionRequested=false;
       try{
-        if(['/api/items','/api/layout','/api/priority','/api/project','/api/write','/api/toggle','/api/display'].includes(path)&&b.sessionId!==sessionId)throw Error('调试会话已切换，请等待界面刷新后重试');
+        if(['/api/items','/api/layout','/api/priority','/api/project','/api/write','/api/toggle','/api/display','/api/selection','/api/group-members'].includes(path)&&b.sessionId!==sessionId)throw Error('调试会话已切换，请等待界面刷新后重试');
         if(path==='/api/connect'){
           if(!['demo','keil','disconnected'].includes(b.mode))throw Error('无效模式');
           if(b.mode==='keil'&&(!Number.isInteger(b.port)||b.port<1||b.port>65535))throw Error('端口无效');
@@ -104,11 +106,22 @@ const server=http.createServer(async(req,res)=>{
         }else if(path==='/api/display'){
           if(typeof b.hex!=='boolean')throw Error('十六进制显示设置无效');
           const item=items.find(v=>v.name===b.root);
-          if(!item||!(item.name===b.name||planFor(item.name).rows.some(row=>row.name===b.name)))throw Error('该变量不属于当前调参面板');
+          if(!containsMember(item,b.name))throw Error('该变量不属于当前调参面板');
           const meta=mode==='demo'?demoRead(b.name):{...values.get(b.name),...catalog?.describe(b.name)};
           if(!isIntegerVariable(meta))throw Error('仅整型变量支持十六进制显示');
           const next=item.name===b.name?{...item,hex:b.hex}:{...item,members:{...item.members,[b.name]:{...item.members?.[b.name],hex:b.hex}}};
           items=items.map(v=>v===item?validateItem(next):v);
+        }else if(path==='/api/selection'){
+          if(b.members!==null&&!Array.isArray(b.members))throw Error('显示成员列表无效');
+          const item=items.find(v=>v.name===b.root);if(!item||!planFor(item.name).group)throw Error('请选择数组或结构体组件');
+          const next={...item};if(b.members===null)delete next.visibleMembers;else next.visibleMembers=b.members;
+          const checked=validateItem(next),known=new Set(planFor(item.name).rows.map(row=>row.name));
+          if(checked.visibleMembers?.some(name=>!known.has(name)))throw Error('成员列表已变化，请重新打开选择列表');
+          items=items.map(v=>v===item?checked:v);sampleCursor=0;
+        }else if(path==='/api/group-members'){
+          if(!validName(b.name))throw Error('变量路径无效');await refreshCatalog();
+          const plan=planFor(b.name);if(!plan.group)throw Error(catalogError||'请选择可展开的数组或结构体');
+          res.setHeader('Content-Type','application/json');res.end(JSON.stringify({...snapshot(),groupMembers:plan.rows.map(({name,type,pointer,array,aggregate})=>({name,type,pointer,array,aggregate})),truncated:plan.truncated}));return;
         }else if(path==='/api/layout'){
           layout=validateLayout(b.layout);
         }else if(path==='/api/priority'){
@@ -120,7 +133,8 @@ const server=http.createServer(async(req,res)=>{
           res.setHeader('Content-Type','application/json');res.end(JSON.stringify({...snapshot(),variables}));return;
         }else if(path==='/api/preview'){
           if(!validName(b.name))throw Error('变量路径无效');if(mode==='keil'&&!client)throw Error('Keil 尚未连接');
-          const value=mode==='demo'?demoRead(b.name):await readLive(b.name);
+          const meta=mode==='keil'?catalog?.describe(b.name):null;
+          const value=b.metadataOnly&&meta&&(meta.array||meta.aggregate)?{...meta,name:b.name,value:meta.array?'['+meta.count+' 项]':'{…}'}:mode==='demo'?demoRead(b.name):await readLive(b.name);
           res.setHeader('Content-Type','application/json');res.end(JSON.stringify({...snapshot(),selected:{...value,name:b.name}}));return;
         }else if(path==='/api/members'){
           if(!validName(b.name))throw Error('请输入完整变量路径');
@@ -159,7 +173,7 @@ const server=http.createServer(async(req,res)=>{
         else if(path==='/api/project'){if(typeof b.path!=='string'||!b.path.toLowerCase().endsWith('.uvoptx'))throw Error('请选择 .uvoptx 文件');await readFile(b.path,'utf8');projectPath=b.path;lastXml='';catalog=null;await syncProject();await refreshCatalog(true);}
         else if(path==='/api/write'||path==='/api/toggle'){
           if(b.sessionKey!==sessionKey||b.sessionId!==sessionId)throw Error('调试会话已切换，请等待界面刷新后重试');
-          const rootItem=items.find(v=>v.name===(b.root||b.name));const allowed=rootItem&&(rootItem.name===b.name||planFor(rootItem.name).rows.some(row=>row.name===b.name));if(!allowed)throw Error('该变量不属于当前调参面板');const item={...rootItem,...rootItem.members?.[b.name]},v=values.get(b.name);if(!v?.editable||!v.updated)throw Error('变量未就绪或不可写');
+          const rootItem=items.find(v=>v.name===(b.root||b.name));if(!containsMember(rootItem,b.name))throw Error('该变量不属于当前调参面板');const item={...rootItem,...rootItem.members?.[b.name]},v=values.get(b.name);if(!v?.editable||!v.updated)throw Error('变量未就绪或不可写');
           const toggled=path==='/api/toggle'?toggleTarget(historyFor(b.name)):null,requested=toggled?toggled.value:b.value;
           validateWrite(item,requested,v.type);let before=Number(v.value);
           if(mode==='demo'){before=Number(demoRead(b.name).value);demo[b.name]=requested;values.set(b.name,{...v,value:String(requested),updated:Date.now()});}
@@ -171,7 +185,7 @@ const server=http.createServer(async(req,res)=>{
         if(!['/api/priority','/api/sessions'].includes(path))await save();res.setHeader('Content-Type','application/json');res.end(JSON.stringify(snapshot()));
       }finally{busy=false;}return;
     }
-    const files={'/':'index.html','/app.js':'app.js','/controls.js':'controls.js','/format.js':'format.js','/layout.js':'layout.js','/editor.js':'editor.js','/search.js':'search.js','/style.css':'style.css','/keil.ico':'keil.ico','/preferences.js':'preferences.js','/session-picker.js':'session-picker.js'};if(req.method!=='GET'||!files[path]){res.writeHead(404);return res.end();}
+    const files={'/':'index.html','/app.js':'app.js','/controls.js':'controls.js','/format.js':'format.js','/layout.js':'layout.js','/editor.js':'editor.js','/search.js':'search.js','/style.css':'style.css','/keil.ico':'keil.ico','/preferences.js':'preferences.js','/session-picker.js':'session-picker.js','/member-picker.js':'member-picker.js','/notices.js':'notices.js'};if(req.method!=='GET'||!files[path]){res.writeHead(404);return res.end();}
     res.setHeader('Content-Type',path.endsWith('.ico')?'image/x-icon':path.endsWith('.js')?'text/javascript':path.endsWith('.css')?'text/css':'text/html; charset=utf-8');res.end(await readFile(new URL('public/'+files[path],root)));
   }catch(e){if(e.variableName&&e.actual)values.set(e.variableName,{...e.actual,updated:Date.now()});res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:e.message}));}
 });

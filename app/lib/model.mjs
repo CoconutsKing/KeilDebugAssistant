@@ -11,6 +11,10 @@ export function validateItem(v){
  const min=Number(v.min??0),max=Number(v.max??100),step=Number(v.step??1);
  if(![min,max,step].every(Number.isFinite)||min>=max||step<=0)throw Error('范围须满足最小值 < 最大值，步长 > 0');
  const item={name:v.name,min,max,step,pinned:!!v.pinned};
+ if(v.visibleMembers!==undefined){
+  if(!Array.isArray(v.visibleMembers)||v.visibleMembers.length>512||new Set(v.visibleMembers).size!==v.visibleMembers.length||v.visibleMembers.some(name=>!validName(name)||![v.name+'.',v.name+'[',v.name+'->'].some(prefix=>name.startsWith(prefix))))throw Error('显示成员列表无效');
+  item.visibleMembers=[...v.visibleMembers];
+ }
  if(v.hex!==undefined){if(typeof v.hex!=='boolean')throw Error('十六进制显示设置无效');item.hex=v.hex;}
  if(v.members){
   if(typeof v.members!=='object'||Array.isArray(v.members)||Object.keys(v.members).length>512)throw Error('成员设置无效');

@@ -3,21 +3,24 @@ import {createLayout} from '/layout.js';
 import {replaceConfiguredItem} from '/editor.js';
 import {searchVariables} from '/search.js';
 import {sessionChoices,createSessionSwitch} from '/session-picker.js';
+import {createMemberSelection} from '/member-picker.js';
+import {connectionNotices} from '/notices.js';
 const $=id=>document.getElementById(id);let state={items:[]},draftSelection=null,onlyPinned=false,editing=null,memberEditing=null,revision=0;
 const labels={disconnected:'未连接',connecting:'正在连接',waiting:'等待 Debug',running:'● 目标运行中',halted:'● 目标已暂停',demo:'● 演示模式',error:'连接异常 / 重试中'};
-async function api(path,data){const context=data.sessionId??state.sessionId;revision++;for(let attempt=0;attempt<40;attempt++){const r=await fetch('/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Keil-Client':'1'},body:JSON.stringify({...data,sessionId:context,...(['write','toggle'].includes(path)?{sessionKey:data.sessionKey??state.sessionKey}:{})})});const b=await r.json();if(r.status===409){await new Promise(r=>setTimeout(r,150));continue;}if(!r.ok)throw Error(b.error||'请求失败');revision++;state=b;if(['write','toggle','display'].includes(path))render();return b;}throw Error('Keil 正忙，请稍后重试');}
+async function api(path,data){const context=data.sessionId??state.sessionId;revision++;for(let attempt=0;attempt<40;attempt++){const r=await fetch('/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Keil-Client':'1'},body:JSON.stringify({...data,sessionId:context,...(['write','toggle'].includes(path)?{sessionKey:data.sessionKey??state.sessionKey}:{})})});const b=await r.json();if(r.status===409){await new Promise(r=>setTimeout(r,150));continue;}if(!r.ok)throw Error(b.error||'请求失败');revision++;state=b;if(['write','toggle','display','selection'].includes(path))render();return b;}throw Error('Keil 正忙，请稍后重试');}
 function error(e){$('error').textContent=e.message;}
 function element(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;}
-function configs(){return state.items.map(({name,min,max,step,pinned,members,hex})=>({name,min,max,step,pinned,...(members?{members}:{}),...(hex!==undefined?{hex}:{})}));}
+function configs(){return state.items.map(({name,min,max,step,pinned,members,hex,visibleMembers})=>({name,min,max,step,pinned,...(members?{members}:{}),...(hex!==undefined?{hex}:{}),...(visibleMembers!==undefined?{visibleMembers}:{})}));}
+function groupType(v,rows){return v.children?`${v.type||''} · ${rows.length} / ${v.totalMembers} 项`:v.type||'等待采样';}
 const cardsByName=new Map();let renderedSession='';
 const layoutController=createLayout({container:$('cards'),save:layout=>api('layout',{layout}),onError:error,onMode:editing=>{$('layoutEdit').textContent=editing?'完成排版':'编辑布局';$('layoutHint').hidden=!editing;}});
 $('layoutEdit').onclick=()=>layoutController.toggle();$('layoutReset').onclick=()=>layoutController.reset();
 const visibleRoots=new Set();let priorityTimer=null,lastPriority='';
 const visibility=new IntersectionObserver(entries=>{for(const entry of entries){if(entry.isIntersecting)visibleRoots.add(entry.target.dataset.root);else visibleRoots.delete(entry.target.dataset.root);}clearTimeout(priorityTimer);priorityTimer=setTimeout(()=>{const names=[...visibleRoots].filter(name=>cardsByName.has(name)).sort(),key=JSON.stringify(names);if(key!==lastPriority){lastPriority=key;void api('priority',{names}).catch(error);}},150);},{rootMargin:'250px'});
 function render(){
- if(renderedSession!==state.sessionId){for(const entry of cardsByName.values()){entry.controls.forEach(c=>c.dispose());visibility.unobserve(entry.card);entry.card.remove();}cardsByName.clear();visibleRoots.clear();lastPriority='';layoutController.replace(state.layout);renderedSession=state.sessionId;for(const id of ['editor','membersDialog'])if($(id).open)$(id).close();}
+ if(renderedSession!==state.sessionId){for(const entry of cardsByName.values()){entry.controls.forEach(c=>c.dispose());visibility.unobserve(entry.card);entry.card.remove();}cardsByName.clear();visibleRoots.clear();lastPriority='';layoutController.replace(state.layout);renderedSession=state.sessionId;bulkPicker=null;for(const id of ['editor','membersDialog','selectionDialog'])if($(id).open)$(id).close();}
 
- $('status').textContent=labels[state.status]||state.status;$('error').textContent=state.lastError||state.compatibility||'';$('count').textContent=`${state.items.length} 个变量`;$('session').textContent=state.mode==='demo'?'演示数据 · 不连接硬件':'127.0.0.1 · UVSOCK';$('project').textContent=state.projectPath||'尚未选择工程 · 连接窗口自动识别，或点击更换来源';renderSessions();applyPreferences();
+ $('status').textContent=labels[state.status]||state.status;$('error').textContent=connectionNotices(state).error;$('count').textContent=`${state.items.length} 个变量`;$('session').textContent=state.mode==='demo'?'演示数据 · 不连接硬件':'127.0.0.1 · UVSOCK';$('project').textContent=state.projectPath||'尚未选择工程 · 连接窗口自动识别，或点击更换来源';renderSessions();applyPreferences();
  const query=$('search').value.toLowerCase(),items=state.items.filter(v=>(!onlyPinned||v.pinned)&&v.name.toLowerCase().includes(query));
  const cards=$('cards');
  cards.querySelector('.empty')?.remove();
@@ -31,21 +34,45 @@ function render(){
    const pin=element('button','icon',v.pinned?'★':'☆');pin.title='收藏到调参面板';pin.onclick=()=>updateItem(v.name,{pinned:!state.items.find(x=>x.name===v.name)?.pinned});
    const edit=element('button','icon','⚙');edit.title='修改变量与范围';edit.setAttribute('aria-label','配置 '+v.name);edit.onclick=()=>{memberEditing=null;void openEditor(state.items.find(x=>x.name===v.name));};
    const remove=element('button','icon','×');remove.title='移除变量';remove.setAttribute('aria-label','移除 '+v.name);remove.onclick=async()=>{remove.disabled=true;try{await api('items',{items:configs().filter(x=>x.name!==v.name)});render();}catch(e){remove.disabled=false;error(e);}};
-   head.append(pin,edit,remove);card.append(head,element('p','type',v.children?`${v.type||''} · ${rows.length} 项 · 滑条上滚轮可直接调节`:v.type||'等待采样'));
+   head.append(pin,edit,remove);card.append(head,element('p','type',groupType(v,rows)));
+   if(v.children){const choose=element('button','choose-members','选择显示成员');choose.setAttribute('aria-label',v.name+' 选择显示成员');choose.onclick=()=>{const context=state.sessionId,current=state.items.find(item=>item.name===v.name);void openMemberPicker(v.name,current?.visibleMembers,selection=>api('selection',{root:v.name,members:selection??null,sessionId:context}));};card.append(choose);}
    if(v.truncated)card.append(element('p','card-error','此组超过 512 项或展开深度限制；请单独选择子数组继续观测。'));
+   if(v.missingMembers?.length)card.append(element('p','card-error','部分已选成员在当前工程中不可用，请重新选择显示成员。'));
+   if(v.children&&!rows.length)card.append(element('p','group-empty','未选择显示成员'));
    const controlSession={sessionKey:state.sessionKey,sessionId:state.sessionId};const controls=rows.map(row=>createControl(row,{root:v.name,api:(path,data)=>api(path,{...data,...controlSession}),settings:current=>{memberEditing=v.children?{root:v.name,name:current.name}:null;void openEditor(current);}}));const body=element('div','widget-body');for(const control of controls)body.append(control.element);card.append(body);
    entry={card,controls,signature};card.dataset.root=v.name;cardsByName.set(v.name,entry);cards.append(card);visibility.observe(card);
   }
   entry.controls.forEach((control,i)=>control.update({...rows[i],editable:rows[i].editable&&connectionSwitch.pending===null&&['running','halted','demo'].includes(state.status)}));
-  entry.card.querySelector(':scope > .type').textContent=v.children?`${v.type||''} · ${rows.length} 项 · 滑条上滚轮可直接调节`:v.type||'等待采样';
+  entry.card.querySelector(':scope > .type').textContent=groupType(v,rows);
  }
  items.forEach((item,index)=>{const card=cardsByName.get(item.name).card;if(cards.children[index]!==card)cards.insertBefore(card,cards.children[index]||null);});
  layoutController.sync(state.layout);
  $('updated').textContent='界面更新 '+new Date().toLocaleTimeString();
 }
 async function updateItem(name,patch){try{await api('items',{items:configs().map(v=>v.name===name?{...v,...patch}:v)});render();}catch(e){error(e);}}
-let variableOptions=[],selectionVersion=0;
+let variableOptions=[],selectionVersion=0,draftVisibleMembers,draftGroupName='',bulkPicker=null,bulkVersion=0;
+const chooseMembers=element('button','choose-members','批量选择显示成员');chooseMembers.type='button';chooseMembers.id='chooseMembers';chooseMembers.hidden=true;$('browseInput').after(chooseMembers);
+function updateMemberButton(){chooseMembers.textContent='批量选择显示成员（'+(draftVisibleMembers===undefined?'全部':draftVisibleMembers.length+' 项')+'）';}
+chooseMembers.onclick=()=>void openMemberPicker($('name').value,draftVisibleMembers,selection=>{draftVisibleMembers=selection;updateMemberButton();});
+async function openMemberPicker(name,selection,save){
+ const version=++bulkVersion,context=state.sessionId;bulkPicker=null;$('selectionRoot').textContent=name;$('memberFilter').value='';$('selectionList').replaceChildren();$('selectionCount').textContent='正在加载…';$('selectionWarning').textContent='';$('selectionError').textContent='';$('selectionSave').disabled=true;$('selectionAll').disabled=$('selectionNone').disabled=true;$('selectionDialog').showModal();
+ try{const result=await api('group-members',{name,sessionId:context});if(version!==bulkVersion||!$('selectionDialog').open||context!==state.sessionId)return;
+  bulkPicker={model:createMemberSelection(result.groupMembers,selection),save,truncated:result.truncated};$('selectionAll').disabled=$('selectionNone').disabled=false;$('selectionSave').disabled=false;renderMemberChoices();
+ }catch(e){if(version===bulkVersion&&$('selectionDialog').open){$('selectionCount').textContent='';$('selectionError').textContent=e.message;}}
+}
+function updateMemberCount(){if(!bulkPicker)return;const model=bulkPicker.model,total=model.rows().length;$('selectionCount').textContent=`已选 ${model.count} / ${total} 项`;$('selectionWarning').textContent=bulkPicker.truncated?'此处最多列出 512 项；可先选择具体子数组或成员，再进行批量选择。':model.count>64?'已选成员较多，刷新一轮需要更长时间。可减少勾选项。':'';}
+function renderMemberChoices(){if(!bulkPicker)return;const rows=bulkPicker.model.rows($('memberFilter').value);$('selectionList').replaceChildren();
+ for(const row of rows){const label=element('label','member-check'),input=element('input');input.type='checkbox';input.checked=bulkPicker.model.has(row.name);input.setAttribute('aria-label',row.name+' 显示');input.onchange=()=>{bulkPicker.model.set([row.name],input.checked);updateMemberCount();};const text=element('div');text.append(element('strong','',row.name),element('small','',row.type||''));label.append(input,text);$('selectionList').append(label);}
+ if(!rows.length)$('selectionList').append(element('p','group-empty','没有匹配成员'));updateMemberCount();
+}
+$('memberFilter').oninput=renderMemberChoices;
+$('memberFilter').onkeydown=event=>{if(event.key==='Enter')event.preventDefault();};
+$('selectionDialog').oncancel=()=>{bulkVersion++;bulkPicker=null;};
+for(const [id,checked] of [['selectionAll',true],['selectionNone',false]])$(id).onclick=()=>{if(bulkPicker){bulkPicker.model.set(bulkPicker.model.rows($('memberFilter').value).map(row=>row.name),checked);renderMemberChoices();}};
+$('selectionCancel').onclick=()=>{$('selectionDialog').close();bulkVersion++;bulkPicker=null;};
+$('selectionForm').onsubmit=async event=>{event.preventDefault();if(!bulkPicker)return;$('selectionSave').disabled=true;$('selectionError').textContent='';try{await bulkPicker.save(bulkPicker.model.value());$('selectionDialog').close();bulkVersion++;bulkPicker=null;}catch(e){$('selectionError').textContent=e.message;}finally{$('selectionSave').disabled=false;}};
 async function openEditor(v,chosenName){
+ draftVisibleMembers=v?.visibleMembers;draftGroupName=chosenName||v?.name||'';chooseMembers.hidden=true;updateMemberButton();
  const selected=chosenName||v?.name||'';editing=v?.name||null;$('name').value=selected;$('name').disabled=false;
  $('dialogTitle').textContent=memberEditing?'设置成员范围':editing?'修改监测变量':'选择监测变量';
  for(const k of ['min','max','step'])$(k).value=v?.[k]??state.defaults?.[k]??({min:0,max:100,step:1}[k]);
@@ -62,11 +89,11 @@ function fillVariableOptions(){
  return matches;
 }
 function chooseSearchResult(name){$('variableSelect').value=name;$('variableSearchResults').hidden=true;void selectVariable(name,0);}
-function runVariableSearch(){selectionVersion++;if(!memberEditing){$('name').value='';$('variableLevels').replaceChildren();$('selectionValue').textContent='请从搜索结果或下拉列表选择变量。';}return fillVariableOptions();}
+function runVariableSearch(){selectionVersion++;if(!memberEditing){$('name').value='';chooseMembers.hidden=true;$('variableLevels').replaceChildren();$('selectionValue').textContent='请从搜索结果或下拉列表选择变量。';}return fillVariableOptions();}
 async function selectVariable(name,depth){
- const version=++selectionVersion;$('name').value=name;const levels=$('variableLevels');while(levels.children.length>depth)levels.lastElementChild.remove();$('selectionValue').textContent='正在读取 '+name+'…';if(!name)return;
+ const version=++selectionVersion;$('name').value=name;chooseMembers.hidden=true;if(draftGroupName!==name){draftGroupName=name;draftVisibleMembers=state.items.find(item=>item.name===name)?.visibleMembers;}updateMemberButton();const levels=$('variableLevels');while(levels.children.length>depth)levels.lastElementChild.remove();$('selectionValue').textContent='正在读取 '+name+'…';if(!name)return;
  try{
-  const preview=await api('preview',{name});if(version!==selectionVersion)return;const v=preview.selected;$('selectionValue').textContent=`${name} = ${v.pointer?'指针（请选择成员）':v.value}　${v.type||''}`;
+  const preview=await api('preview',{name,metadataOnly:true});if(version!==selectionVersion)return;const v=preview.selected;$('selectionValue').textContent=`${name} = ${v.pointer?'指针（请选择成员）':v.value}　${v.type||''}`;chooseMembers.hidden=!!memberEditing||!v.array&&!v.aggregate;
   if(!v.array&&!v.aggregate&&!v.pointer)return;
   const result=await api('members',{name});if(version!==selectionVersion)return;appendMemberSelect(name,result,depth,version);
  }catch(e){if(version===selectionVersion)$('selectionValue').textContent=e.message;}
@@ -100,7 +127,7 @@ async function loadMembers(name,container,offset=0){
  }catch(e){loading.textContent=e.message;loading.className='card-error';}
 }
 $('browseInput').onclick=()=>openMembers($('name').value.trim());$('browseRoot').onclick=()=>{const name=$('memberRoot').value.trim();$('memberTree').replaceChildren();void loadMembers(name,$('memberTree'));};$('closeMembers').onclick=()=>$('membersDialog').close();
-$('add').onclick=()=>{memberEditing=null;void openEditor();};$('cancel').onclick=()=>$('editor').close();$('form').onsubmit=async e=>{e.preventDefault();try{const item={name:$('name').value.trim(),min:Number($('min').value),max:Number($('max').value),step:Number($('step').value),pinned:$('pinned').checked};let next=configs();if(memberEditing){const parent=next.find(v=>v.name===memberEditing.root);if(!parent)throw Error('变量已被移除');parent.members={...parent.members,[memberEditing.name]:{...parent.members?.[memberEditing.name],min:item.min,max:item.max,step:item.step}};}else if(editing)next=replaceConfiguredItem(next,editing,item);else next.push(item);const rename=editing&&!memberEditing&&editing!==item.name?{from:editing,to:item.name,layout:layoutController.capture()}:null;await api('items',{items:next,...(rename?{rename}:{}),...(!editing?{remember:item}:{})});$('editor').close();memberEditing=null;render();}catch(e){$('formError').textContent=e.message;}};
+$('add').onclick=()=>{memberEditing=null;void openEditor();};$('cancel').onclick=()=>$('editor').close();$('form').onsubmit=async e=>{e.preventDefault();try{const item={name:$('name').value.trim(),min:Number($('min').value),max:Number($('max').value),step:Number($('step').value),pinned:$('pinned').checked,visibleMembers:draftVisibleMembers};let next=configs();if(memberEditing){const parent=next.find(v=>v.name===memberEditing.root);if(!parent)throw Error('变量已被移除');parent.members={...parent.members,[memberEditing.name]:{...parent.members?.[memberEditing.name],min:item.min,max:item.max,step:item.step}};}else if(editing)next=replaceConfiguredItem(next,editing,item);else next.push(item);const rename=editing&&!memberEditing&&editing!==item.name?{from:editing,to:item.name,layout:layoutController.capture()}:null;await api('items',{items:next,...(rename?{rename}:{}),...(!editing?{remember:item}:{})});$('editor').close();memberEditing=null;render();}catch(e){$('formError').textContent=e.message;}};
 const connectionSwitch=createSessionSwitch({connect:request=>api('connect',request),onChange:()=>{$('connect').disabled=connectionSwitch.pending!==null;render();}});
 async function connectSession(){const chosen=$('instance').value;draftSelection=chosen;try{await connectionSwitch.select({mode:$('mode').value,port:chosen==='auto'?Number($('port').value):Number(chosen),selection:chosen});}catch(e){error(e);}finally{if(connectionSwitch.pending===null)draftSelection=null;render();}}
 $('connect').onclick=connectSession;$('instance').onchange=()=>{draftSelection=$('instance').value;if(state.mode==='keil')void connectSession();};
@@ -118,7 +145,7 @@ $('load').onclick=()=>$('file').click();$('file').onchange=async()=>{try{const f
 let sessionOptions='',prefsApplied='';
 function renderSessions(){$('refreshSessions').disabled=!!state.discovering;$('refreshSessions').textContent=state.discovering?'正在刷新…':'刷新窗口';const list=state.sessions||[],choice=sessionChoices(list,connectionSwitch.pending??draftSelection??state.selection??'auto',state.session),key=JSON.stringify(choice.options);if(key!==sessionOptions){sessionOptions=key;$('instance').replaceChildren();for(const item of choice.options){const option=new Option(item.label,item.value);option.title=item.title||'';option.disabled=item.disabled;$('instance').append(option);}}$('instance').value=choice.selected;
  $('connectedTarget').textContent=state.session?'当前窗口：'+state.session.title+' · 端口 '+state.session.port:'选择正在调试的 Keil 窗口后自动识别工程';
- $('sessionHint').textContent=state.sessionError||((state.discovering?(choice.selected!=='auto'?'正在更新窗口信息，保持固定窗口。 ':['running','halted'].includes(state.status)?'正在后台识别窗口，当前会话的变量仍持续采样。 ':'正在后台识别 Keil 窗口，首次连接请稍候。 '):'')+(list.some(s=>!s.port)?'发现未监听端口的 Keil 窗口：请在各窗口的 Other 配置中设置不同端口。 ':'')+(state.mode==='keil'?(choice.selected==='auto'?'自动模式保留当前 Debug 会话；需要切换时请在下拉列表选择窗口。':'已固定所选窗口，不会自动切换。'):'连接前可点击“刷新窗口”查看已打开的 Keil。'));}
+ $('sessionHint').textContent=connectionNotices(state).warning;}
 function applyPreferences(){const p=state.preferences||{},key=JSON.stringify(p);if(key===prefsApplied)return;prefsApplied=key;document.documentElement.dataset.theme=p.theme||'forest';document.body.classList.toggle('sidebar-collapsed',!!p.collapsed);for(const button of document.querySelectorAll('.theme-swatch'))button.setAttribute('aria-pressed',String(button.dataset.theme===(p.theme||'forest')));$('guide').open=p.guideOpen!==false;$('sidebarToggle').setAttribute('aria-expanded',String(!p.collapsed));$('sidebarToggle').setAttribute('aria-label',p.collapsed?'展开侧栏':'收起侧栏');}
 async function setPreference(patch){try{await api('preferences',{preferences:patch});applyPreferences();}catch(e){error(e);}}
 for(const button of document.querySelectorAll('.theme-swatch'))button.onclick=()=>void setPreference({theme:button.dataset.theme});$('sidebarToggle').onclick=()=>void setPreference({collapsed:!state.preferences?.collapsed});
