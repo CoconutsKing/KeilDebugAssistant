@@ -15,18 +15,17 @@ const root=new URL('./',import.meta.url),home=new URL('../',root),userRoot=proce
 await mkdir(userRoot,{recursive:true});await mkdir(dataRoot,{recursive:true});
 const pool=new SessionPool();let selection='auto',sessionInfo=null,sessionKey='',sessionId='',profiles={},prefs=validatePreferences({});
 let items=[],mode='disconnected',client=null,status='disconnected',lastError='',interval=500,projectPath='',lastXml='',values=new Map(),busy=false;
-let shuttingDown=false;const runtime=new URL('runtime.json',dataRoot),shutdownToken=randomUUID();
+let shuttingDown=false,connectionEpoch=0;const runtime=new URL('runtime.json',dataRoot),shutdownToken=randomUUID();
 let catalog=null,catalogError='',catalogChecked=0;
 let interactionRequested=false;
 let defaults={min:0,max:100,step:1,pinned:true},excluded=new Set(),groupPlans=new Map(),sampleCursor=0;
 let activeRoots=[],sampleRound=0;
 let layout={mode:'grid',widgets:{}};
 let writeHistory={};
-function historyScope(){return mode==='demo'?'demo':projectPath||'keil';}
+function historyScope(){return projectPath||'keil';}
 function historyFor(name){const history=writeHistory[historyScope()]?.[name];return validHistory(history)?history:null;}
 function rememberHistory(name,history){if(!validHistory(history))return;const scope=historyScope();if(!Object.hasOwn(writeHistory,scope))writeHistory[scope]={};Object.defineProperty(writeHistory[scope],name,{value:history,writable:true,enumerable:true,configurable:true});}
-function demoChildren(name){const value=demoRead(name);if(value.array)return Array.from({length:value.count},(_,i)=>({name:`${name}[${i}]`}));const keys={motor:['target_rpm','actual_rpm','enabled'],pid:['kp','ki'],board:['temperature']};return (keys[name]||(/^controllers\[[0-3]\]$/.test(name)?['gain','enabled']:[])).map(key=>({name:name+'.'+key}));}
-function planFor(name){const key=(mode==='demo'?'demo':catalog?.key||'')+':'+name;if(groupPlans.has(key))return groupPlans.get(key);const describe=mode==='demo'?path=>{try{return demoRead(path);}catch{return null;}}:path=>catalog?.describe(path);const children=mode==='demo'?demoChildren:path=>{const all=[];let offset=0;do{const page=catalog?.children(path,offset);if(!page)break;all.push(...page.members);offset=page.nextOffset;}while(offset!==null&&all.length<513);return all;};const result=flattenGroup(name,describe,children);groupPlans.set(key,result);return result;}
+function planFor(name){const key=(catalog?.key||'')+':'+name;if(groupPlans.has(key))return groupPlans.get(key);const describe=path=>catalog?.describe(path);const children=path=>{const all=[];let offset=0;do{const page=catalog?.children(path,offset);if(!page)break;all.push(...page.members);offset=page.nextOffset;}while(offset!==null&&all.length<513);return all;};const result=flattenGroup(name,describe,children);groupPlans.set(key,result);return result;}
 function rowsFor(item){return selectedRows(planFor(item.name),item.visibleMembers);}
 function containsMember(item,name){return item&&(item.name===name||rowsFor(item).some(row=>row.name===name));}
 async function refreshCatalog(force=false){if(!projectPath)return;if(!force&&Date.now()-catalogChecked<5000)return;catalogChecked=Date.now();try{catalog=await loadCatalog(projectPath);catalogError='';}catch(e){catalog=null;catalogError=e.message;}}
@@ -45,35 +44,22 @@ function save(){
  const data=JSON.stringify({...panelData(),sessionKey,profiles,preferences:prefs},null,2),tmp=new URL('panel.json.tmp',userRoot);
  const result=saveQueue.catch(()=>{}).then(async()=>{await writeFile(tmp,data);await rename(tmp,config);});saveQueue=result;return result;
 }
-async function activateSession(info){if(!sessionInfo||sessionInfo.port!==info.port||sessionInfo.pid!==info.pid||sessionInfo.project!==info.project){sessionId=randomUUID();values.clear();}const next=info.project?info.project.toLowerCase():'port:'+info.port;if(next!==sessionKey){if(sessionKey)profiles[sessionKey]=panelData();const same=projectPath&&info.project&&projectPath.replace(/\.uvoptx$/i,'.uvprojx').toLowerCase()===info.project.toLowerCase();if(profiles[next])applyPanel(profiles[next]);else if(!same)applyPanel();sessionKey=next;projectPath=info.project?info.project.replace(/\.uvprojx?$/i,'.uvoptx'):projectPath;await save();}sessionInfo=info;client=pool.clients.get(info.port);keilPort=info.port;}
-
-const demo={ 'motor.target_rpm':1200,'motor.actual_rpm':1187,'pid.kp':1.2,'pid.ki':0.08,'motor.enabled':1,'board.temperature':36.5};
-function demoRead(name){
-  const groups={motor:['target_rpm','actual_rpm','enabled'],pid:['kp','ki'],board:['temperature']};
-  if(groups[name])return {name,value:'{…}',type:'class '+name,count:groups[name].length,aggregate:true,array:false,pointer:false,editable:false};
-  if(name==='samples'||name==='controllers')return {name,value:'[…] ',type:name==='samples'?'float[128]':'Controller[4]',count:name==='samples'?128:4,array:true,aggregate:false,editable:false};
-  if(/^controllers\[[0-3]\]$/.test(name))return {name,value:'{…}',type:'class Controller',count:2,aggregate:true,array:false,editable:false};
-  const known=Object.hasOwn(demo,name)||/^samples\[\d+\]$/.test(name)||/^controllers\[[0-3]\]\.(gain|enabled)$/.test(name);
-  if(!known)throw Error('演示模式没有该变量，可使用 samples[0] 或 controllers[0].gain');
-  let value=demo[name]??(name.endsWith('.enabled')?1:0.5);if(name==='motor.actual_rpm')value=(demo['motor.target_rpm']||0)+Math.round(Math.sin(Date.now()/700)*18);
-  return {name,value:String(value),type:name.includes('pid')||name.includes('temperature')||name.includes('samples')||name.endsWith('.gain')?'float':'int',count:0,aggregate:false,array:false,editable:true};
-}
+async function activateSession(info,epoch=connectionEpoch){if(epoch!==connectionEpoch||mode!=='keil')return;if(!sessionInfo||sessionInfo.port!==info.port||sessionInfo.pid!==info.pid||sessionInfo.project!==info.project){sessionId=randomUUID();values.clear();}const next=info.project?info.project.toLowerCase():'port:'+info.port;if(next!==sessionKey){if(sessionKey)profiles[sessionKey]=panelData();const same=projectPath&&info.project&&projectPath.replace(/\.uvoptx$/i,'.uvprojx').toLowerCase()===info.project.toLowerCase();if(profiles[next])applyPanel(profiles[next]);else if(!same)applyPanel();sessionKey=next;projectPath=info.project?info.project.replace(/\.uvprojx?$/i,'.uvoptx'):projectPath;await save();}if(epoch!==connectionEpoch||mode!=='keil')return;sessionInfo=info;client=pool.clients.get(info.port);keilPort=info.port;}
 async function syncProject(){if(!projectPath)return;const xml=await readFile(projectPath,'utf8');if(xml===lastXml)return;lastXml=xml;for(const name of watchNames(xml))if(!excluded.has(name)&&!items.some(v=>v.name===name))items.push(validateItem({name}));await save();}
-async function sample(name){try{const value=mode==='demo'?demoRead(name):await readLive(name);values.set(name,{...value,updated:Date.now()});}catch(e){values.set(name,{...values.get(name),error:e.message,editable:false});if(mode==='keil'&&client?.socket?.destroyed){client=null;throw e;}}}
-async function samplePanel(){const active=items.filter(item=>activeRoots.includes(item.name));const selected=active.length&&++sampleRound%10!==0?active:items;const names=[...new Set(selected.flatMap(item=>planFor(item.name).group?rowsFor(item).map(v=>v.name):[item.name]))];if(!names.length)return;const budget=mode==='demo'?names.length:8;for(let i=0;i<Math.min(budget,names.length);i++){sampleCursor%=names.length;await sample(names[sampleCursor++]);if(interactionRequested)break;}}
-async function poll(){if(shuttingDown)return;if(busy){setTimeout(poll,interval);return;}busy=true;try{
-  pool.applyDiscovered(null);if(mode!=='keil')await syncProject();
-  if(mode==='demo'){status='demo';await samplePanel();lastError='';}
-  else if(mode==='keil'){
-    const sessions=await pool.refresh(keilPort);if(selection==='auto'&&!pool.hasDiscovered){status='connecting';lastError='正在后台识别 Keil 窗口…';return;}const selected=chooseSession(sessions,sessionInfo?.port,selection);
-    if(!selected||!['running','halted'].includes(selected.status)){if(selected&&selected.status==='waiting')await activateSession(selected);status='waiting';values.clear();lastError=pool.error||'等待 Debug：请在目标 Keil 窗口进入调试。多窗口需使用不同 UVSOCK 端口；无端口窗口请按新手教程配置。';return;}
-    await activateSession(selected);status=selected.status;
+async function sample(name,epoch){try{const value=await readLive(name);if(epoch===connectionEpoch)values.set(name,{...value,updated:Date.now()});}catch(e){if(epoch!==connectionEpoch)return;values.set(name,{...values.get(name),error:e.message,editable:false});if(client?.socket?.destroyed){client=null;throw e;}}}
+async function samplePanel(epoch){const active=items.filter(item=>activeRoots.includes(item.name));const selected=active.length&&++sampleRound%10!==0?active:items;const names=[...new Set(selected.flatMap(item=>planFor(item.name).group?rowsFor(item).map(v=>v.name):[item.name]))];for(let i=0;i<Math.min(8,names.length);i++){if(epoch!==connectionEpoch||mode!=='keil')break;sampleCursor%=names.length;await sample(names[sampleCursor++],epoch);if(interactionRequested)break;}}
+async function poll(){if(shuttingDown)return;if(busy){setTimeout(poll,interval);return;}busy=true;const epoch=connectionEpoch;try{
+  pool.applyDiscovered(null);
+  if(mode==='keil'){
+    const sessions=await pool.refresh(keilPort);if(epoch!==connectionEpoch)return;if(selection==='auto'&&!pool.hasDiscovered){status='connecting';lastError='';return;}const selected=chooseSession(sessions,sessionInfo?.port,selection);
+    if(!selected||!['running','halted'].includes(selected.status)){if(selected&&selected.status==='waiting')await activateSession(selected,epoch);if(epoch!==connectionEpoch)return;status=selected?.status==='waiting'?'waiting':'error';values.clear();lastError=selected?.error||pool.error||'未找到可用的 Keil 会话，请检查所选窗口、UVSOCK 开关与端口。';return;}
+    await activateSession(selected,epoch);if(epoch!==connectionEpoch)return;status=selected.status;
     try{await syncProject();}catch(e){catalogError='Watch 文件暂不可用：'+e.message;}
-    await refreshCatalog();lastError='';await samplePanel();
+    if(epoch!==connectionEpoch)return;await refreshCatalog();if(epoch!==connectionEpoch)return;lastError='';await samplePanel(epoch);
   }
-}catch(e){lastError=e.message;status='error';}finally{busy=false;setTimeout(poll,interval);}}
+}catch(e){if(epoch===connectionEpoch){lastError=e.message;status='error';}}finally{busy=false;setTimeout(poll,interval);}}
 let keilPort=4823;
-function snapshot(){return {version:'2.0.6',preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name),rows=rowsFor(v);return {...v,...values.get(v.name),...(plan.group?{...((mode==='demo'?demoRead(v.name):catalog?.describe(v.name))||{}),value:'',editable:false,children:rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),totalMembers:plan.rows.length,missingMembers:v.visibleMembers?.filter(name=>!rows.some(row=>row.name===name))||[],truncated:plan.truncated}:{}),name:v.name,history:historyFor(v.name)};})};}
+function snapshot(){return {version:'2.0.7',preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name),rows=rowsFor(v);return {...v,...values.get(v.name),...(plan.group?{...(catalog?.describe(v.name)||{}),value:'',editable:false,children:rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),totalMembers:plan.rows.length,missingMembers:v.visibleMembers?.filter(name=>!rows.some(row=>row.name===name))||[],truncated:plan.truncated}:{}),name:v.name,history:historyFor(v.name)};})};}
 async function body(req){let data='';for await(const chunk of req){data+=chunk;if(data.length>1024*1024)throw Error('请求过大');}return JSON.parse(data||'{}');}
 const server=http.createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');
@@ -95,28 +81,31 @@ const server=http.createServer(async(req,res)=>{
         prefs=validatePreferences({...prefs,...b.preferences});await save();
         res.setHeader('Content-Type','application/json');res.end(JSON.stringify(snapshot()));return;
       }
+      if(path==='/api/connect'&&b.mode==='disconnected'){
+        connectionEpoch++;mode='disconnected';status='disconnected';lastError='';sessionId=randomUUID();
+        pool.close();client=null;sessionInfo=null;values.clear();await save();
+        res.setHeader('Content-Type','application/json');res.end(JSON.stringify(snapshot()));return;
+      }
       if(busy){interactionRequested=true;res.writeHead(409);return res.end(JSON.stringify({error:'正在采样，请稍后重试'}));}busy=true;interactionRequested=false;
       try{
         if(['/api/items','/api/layout','/api/priority','/api/project','/api/write','/api/toggle','/api/display','/api/selection','/api/group-members'].includes(path)&&b.sessionId!==sessionId)throw Error('调试会话已切换，请等待界面刷新后重试');
         if(path==='/api/connect'){
-          if(!['demo','keil','disconnected'].includes(b.mode))throw Error('无效模式');
+          if(b.mode!=='keil')throw Error('仅支持连接 Keil 或断开连接');
           if(b.mode==='keil'&&(!Number.isInteger(b.port)||b.port<1||b.port>65535))throw Error('端口无效');
-          if(sessionKey)profiles[sessionKey]=panelData();mode=b.mode;lastError='';keilPort=b.port||4823;selection=b.selection==='auto'||b.selection===undefined?'auto':String(b.port);
+          const epoch=++connectionEpoch;if(sessionKey)profiles[sessionKey]=panelData();mode=b.mode;lastError='';keilPort=b.port||4823;selection=b.selection==='auto'||b.selection===undefined?'auto':String(b.port);
           if(mode==='keil'){
             pool.applyDiscovered(keilPort);const chosen=chooseSession(pool.sessions,sessionInfo?.port,selection);
-            if(chosen){await activateSession(chosen);status=['running','halted','waiting'].includes(chosen.status)?chosen.status:'connecting';}
+            if(chosen){await activateSession(chosen,epoch);if(epoch===connectionEpoch)status=['running','halted','waiting'].includes(chosen.status)?chosen.status:'connecting';}
             else{client=null;sessionInfo=null;sessionId=randomUUID();values.clear();status='connecting';}
-            void pool.scan();
+            if(epoch===connectionEpoch)void pool.scan();
           }else{pool.close();client=null;sessionInfo=null;sessionId=randomUUID();values.clear();status='connecting';}
-          if(mode==='demo'&&sessionKey!=='demo'){applyPanel(profiles.demo);sessionKey='demo';}
-          if(mode==='demo'&&!items.length)items=Object.keys(demo).map(name=>validateItem({name,min:0,max:name.includes('rpm')?5000:name.includes('enabled')?1:100,step:name.includes('pid')?0.01:1,pinned:name!=='motor.actual_rpm'}));
           if(mode==='disconnected')status='disconnected';
-        }else if(path==='/api/sessions'){await pool.refresh(Number(b.port)||keilPort,true);
+        }else if(path==='/api/sessions'){if(mode==='keil')await pool.refresh(Number(b.port)||keilPort,true);else{void pool.scan(true);pool.applyDiscovered(null);}
         }else if(path==='/api/display'){
           if(typeof b.hex!=='boolean')throw Error('十六进制显示设置无效');
           const item=items.find(v=>v.name===b.root);
           if(!containsMember(item,b.name))throw Error('该变量不属于当前调参面板');
-          const meta=mode==='demo'?demoRead(b.name):{...values.get(b.name),...catalog?.describe(b.name)};
+          const meta={...values.get(b.name),...catalog?.describe(b.name)};
           if(!isIntegerVariable(meta))throw Error('仅整型变量支持十六进制显示');
           const next=item.name===b.name?{...item,hex:b.hex}:{...item,members:{...item.members,[b.name]:{...item.members?.[b.name],hex:b.hex}}};
           items=items.map(v=>v===item?validateItem(next):v);
@@ -137,17 +126,17 @@ const server=http.createServer(async(req,res)=>{
           if(!Array.isArray(b.names)||b.names.length>500)throw Error('可见变量列表无效');activeRoots=b.names.filter(name=>items.some(v=>v.name===name));sampleCursor=0;
         }else if(path==='/api/catalog'){
           await refreshCatalog(true);
-          let variables=mode==='demo'?['motor','pid','board','samples','controllers',...Object.keys(demo)].map(name=>({name,...demoRead(name)})):catalog?.variables||[];
+          let variables=catalog?.variables||[];
           const known=new Set(variables.map(v=>v.name));for(const item of items)if(!known.has(item.name))variables.push({name:item.name,type:'Watch / 已配置'});
           res.setHeader('Content-Type','application/json');res.end(JSON.stringify({...snapshot(),variables}));return;
         }else if(path==='/api/preview'){
           if(!validName(b.name))throw Error('变量路径无效');if(mode==='keil'&&!client)throw Error('Keil 尚未连接');
           const meta=mode==='keil'?catalog?.describe(b.name):null;
-          const value=b.metadataOnly&&meta&&(meta.array||meta.aggregate)?{...meta,name:b.name,value:meta.array?'['+meta.count+' 项]':'{…}'}:mode==='demo'?demoRead(b.name):await readLive(b.name);
+          const value=b.metadataOnly&&meta&&(meta.array||meta.aggregate)?{...meta,name:b.name,value:meta.array?'['+meta.count+' 项]':'{…}'}:await readLive(b.name);
           res.setHeader('Content-Type','application/json');res.end(JSON.stringify({...snapshot(),selected:{...value,name:b.name}}));return;
         }else if(path==='/api/members'){
           if(!validName(b.name))throw Error('请输入完整变量路径');
-          if(!['demo','keil'].includes(mode))throw Error('请先连接演示或 Keil');
+          if(mode!=='keil'||!client)throw Error('请先连接 Keil');
           const offset=b.offset??0;if(!Number.isInteger(offset)||offset<0)throw Error('数组起始下标无效');
           if(mode==='keil'){
             await refreshCatalog();const indexed=catalog?.children(b.name,offset);
@@ -156,14 +145,10 @@ const server=http.createServer(async(req,res)=>{
               res.setHeader('Content-Type','application/json');res.end(JSON.stringify({...snapshot(),...indexed}));return;
             }
           }
-          const parent=mode==='demo'?demoRead(b.name):await client.read(b.name);let members=[],total=parent.count;
+          const parent=await client.read(b.name);let members=[],total=parent.count;
           if(parent.array){
             if(!Number.isInteger(total)||total<0)throw Error('数组大小不可用');
             members=Array.from({length:Math.max(0,Math.min(64,total-offset))},(_,i)=>({name:`${b.name}[${offset+i}]`,type:'数组元素',expandable:true}));
-          }else if(mode==='demo'){
-            const names={motor:['target_rpm','actual_rpm','enabled'],pid:['kp','ki'],board:['temperature']};
-            const keys=names[b.name]||(/^controllers\[[0-3]\]$/.test(b.name)?['gain','enabled']:[]);
-            members=keys.map(key=>{const name=b.name+'.'+key;return {...demoRead(name),name,expandable:false};});
           }else{
             if(!client)throw Error('Keil 尚未连接');
             const result=await client.members(b.name);
@@ -185,8 +170,7 @@ const server=http.createServer(async(req,res)=>{
           const rootItem=items.find(v=>v.name===(b.root||b.name));if(!containsMember(rootItem,b.name))throw Error('该变量不属于当前调参面板');const item={...rootItem,...rootItem.members?.[b.name]},v=values.get(b.name);if(!v?.editable||!v.updated)throw Error('变量未就绪或不可写');
           const toggled=path==='/api/toggle'?toggleTarget(historyFor(b.name)):null,requested=toggled?toggled.value:b.value;
           validateWrite(item,requested,v.type);let before=Number(v.value);
-          if(mode==='demo'){before=Number(demoRead(b.name).value);demo[b.name]=requested;values.set(b.name,{...v,value:String(requested),updated:Date.now()});}
-          else if(mode==='keil'&&client){await client.status();const result=await client.write(b.name,requested);before=Number(result.beforeValue);values.set(b.name,{...result,updated:Date.now()});}
+          if(mode==='keil'&&client){const target=client;try{await target.status();if(b.sessionId!==sessionId)throw Error('连接已断开');const result=await target.write(b.name,requested);if(b.sessionId!==sessionId)throw Error('连接已断开');before=Number(result.beforeValue);values.set(b.name,{...result,updated:Date.now()});}catch(e){if(b.sessionId!==sessionId)throw Error('连接已断开，已取消旧会话操作');throw e;}}
           else throw Error('没有可写的调试会话');
           rememberHistory(b.name,toggled?toggled.history:recordInput(historyFor(b.name),requested,before));
         }else if(path==='/api/interval'){if(!Number.isInteger(b.interval)||b.interval<100||b.interval>10000)throw Error('刷新间隔须为 100–10000 ms');interval=b.interval;}

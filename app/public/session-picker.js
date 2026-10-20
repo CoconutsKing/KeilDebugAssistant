@@ -8,10 +8,21 @@ export function sessionChoices(sessions,selection='auto',current=null){
 }
 // Keep the latest choice visible while earlier connection requests finish.
 export function createSessionSwitch({connect,onChange=()=>{}}){
- let pending=null,sequence=0,queue=Promise.resolve();
- return {get pending(){return pending;},async select(request){
-  const id=++sequence;pending=request.selection;onChange();
-  const task=queue.catch(()=>{}).then(()=>id===sequence?connect(request):undefined);queue=task;
-  try{return await task;}finally{if(id===sequence){pending=null;onChange();}}
+ let pending=null,pendingRequest=null,sequence=0,queue=Promise.resolve(),controller=null;
+ return {get pending(){return pending;},get pendingRequest(){return pendingRequest;},async select(request){
+  const id=++sequence;controller?.abort();controller=new AbortController();const signal=controller.signal;pending=request.selection;pendingRequest=request;onChange();
+  const task=(request.mode==='disconnected'?Promise.resolve():queue.catch(()=>{})).then(()=>id===sequence?connect(request,signal):undefined);queue=task;
+  try{return await task;}catch(e){if(e.name!=='AbortError'||id===sequence)throw e;}finally{if(id===sequence){pending=null;pendingRequest=null;onChange();}}
  }};
+}
+export function connectionView(state,pending=null){
+ if(state.serviceError)return {light:'red',text:'工具服务不可用',button:'重新连接',action:'connect',connected:false,cancel:false};
+ const active=pending?pending.mode==='keil':state.mode==='keil';
+ if(pending?.mode==='disconnected')return {light:'yellow',text:'正在断开',button:'正在断开…',action:'disconnect',connected:false,cancel:false};
+ if(pending)return {light:'yellow',text:'正在连接 Keil',button:'取消连接',action:'disconnect',connected:false,cancel:false};
+ if(active&&['running','halted'].includes(state.status))return {light:'green',text:state.status==='running'?'Keil 已连接 · 运行中':'Keil 已连接 · 已暂停',button:'断开连接',action:'disconnect',connected:true,cancel:false};
+ if(active&&state.status==='waiting')return {light:'yellow',text:'等待进入 Debug',button:'取消连接',action:'disconnect',connected:false,cancel:false};
+ if(active&&state.status==='connecting')return {light:'yellow',text:'正在连接 Keil',button:'取消连接',action:'disconnect',connected:false,cancel:false};
+ if(active)return {light:'red',text:'Keil 连接失败',button:'重新连接',action:'connect',connected:false,cancel:true};
+ return {light:'red',text:'Keil 未连接',button:'连接 Keil',action:'connect',connected:false,cancel:false};
 }

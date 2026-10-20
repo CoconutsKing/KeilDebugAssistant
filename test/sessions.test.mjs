@@ -25,7 +25,7 @@ test('two real UVSOCK sockets recover from status 6 and switch to another Debug 
 });
 test('theme/sidebar/guide preferences validate and survive JSON roundtrip',()=>{
  for(const theme of ['forest','ocean','violet','amber','dark'])assert.equal(preferences(JSON.parse(JSON.stringify({theme,collapsed:true,guideOpen:false}))).theme,theme);
- assert.deepEqual(preferences({theme:'invalid',collapsed:'yes'}),{theme:'forest',collapsed:false,guideOpen:true});
+ assert.deepEqual(preferences({theme:'invalid',collapsed:'yes'}),{theme:'forest',collapsed:false,guideOpen:true,guideDismissed:false});
 });
 test('slow process discovery never blocks status polling and duplicate scans are coalesced',async()=>{
  let finish,calls=0;const pool=new SessionPool({discover:()=>{calls++;return new Promise(resolve=>{finish=resolve;});},create:()=>({socket:{destroyed:false},async connect(){},async status(){return 'running';},close(){}})});
@@ -47,4 +47,9 @@ test('a reused TCP port owned by another Keil process reconnects the socket',asy
 test('disconnect aborts an in-progress OS scan without leaving a connection error',async()=>{
  let aborted=false;const pool=new SessionPool({discover:({signal})=>new Promise((resolve,reject)=>{signal.addEventListener('abort',()=>{aborted=true;reject(Error('cancelled'));},{once:true});})});
  const scan=pool.scan(true);await Promise.resolve();pool.close();await scan;assert.equal(aborted,true);assert.equal(pool.discovering,false);assert.equal(pool.error,'');
+});
+
+test('disconnect during a status request cannot reconnect the remaining windows',async()=>{
+ const connected=[];let finish;const pool=new SessionPool({discover:async()=>[{port:4823,pid:1},{port:4824,pid:2}],create:()=>({socket:{destroyed:false},async connect(port){connected.push(port);},status(){return new Promise(resolve=>finish=resolve);},close(){this.socket.destroyed=true;}})});
+ await pool.scan(true);const refresh=pool.refresh(null);await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(connected,[4823]);pool.close();finish('running');await refresh;assert.deepEqual(connected,[4823]);assert.equal(pool.clients.size,0);assert.deepEqual(pool.sessions,[]);
 });

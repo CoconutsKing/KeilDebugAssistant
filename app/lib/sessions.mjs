@@ -37,13 +37,14 @@ export class SessionPool{
   if(extraPort&&!this.sessions.some(s=>s.port===extraPort))this.sessions.push({port:extraPort,pid:null,title:'手动端口 '+extraPort,project:'',status:'unknown'});
  }
  async refresh(extraPort=4823,force=false){
-  void this.scan(force);this.applyDiscovered(extraPort);
+  const generation=this.generation;void this.scan(force);this.applyDiscovered(extraPort);
   for(const s of this.sessions){
+   if(generation!==this.generation)break;
    if(!s.port)continue;let c=this.clients.get(s.port);
-   try{if(!c||c.socket?.destroyed){c?.close();c=this.create();this.clients.set(s.port,c);await c.connect(s.port);}s.status=await c.status();s.error='';}
-   catch(e){s.status=e.keilStatus===6?'waiting':'unavailable';s.error=e.message;if(c?.socket?.destroyed)this.clients.delete(s.port);if(c?.legacy&&e.keilStatus===6&&Date.now()-(c.lastOptionsRetry||0)>3000){c.lastOptionsRetry=Date.now();try{await c.enableExtended();}catch{}}}
+   try{if(!c||c.socket?.destroyed){c?.close();c=this.create();this.clients.set(s.port,c);await c.connect(s.port);}if(generation!==this.generation){c.close();break;}const status=await c.status();if(generation!==this.generation){c.close();break;}s.status=status;s.error='';}
+   catch(e){if(generation!==this.generation){c?.close();break;}s.status=e.keilStatus===6?'waiting':'unavailable';s.error=e.message;if(c?.socket?.destroyed)this.clients.delete(s.port);if(c?.legacy&&e.keilStatus===6&&Date.now()-(c.lastOptionsRetry||0)>3000){c.lastOptionsRetry=Date.now();try{await c.enableExtended();}catch{}}}
   }
   return this.sessions;
  }
- close(){this.generation++;this.scanController?.abort();this.scanController=null;this.discovery=null;this.pendingSessions=null;this.discovering=false;this.hasDiscovered=false;this.scanned=0;this.sessions=[];for(const c of this.clients.values())c.close();this.clients.clear();}
+ close(){this.generation++;this.scanController?.abort();this.scanController=null;this.discovery=null;this.pendingSessions=null;this.discovering=false;this.hasDiscovered=false;this.scanned=0;this.sessions=[];this.error='';for(const c of this.clients.values())c.close();this.clients.clear();}
 }

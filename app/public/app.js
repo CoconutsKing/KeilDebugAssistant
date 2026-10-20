@@ -2,13 +2,13 @@ import {createControl} from '/controls.js';
 import {createLayout} from '/layout.js';
 import {replaceConfiguredItem} from '/editor.js';
 import {searchVariables} from '/search.js';
-import {sessionChoices,createSessionSwitch} from '/session-picker.js';
+import {sessionChoices,createSessionSwitch,connectionView} from '/session-picker.js';
 import {createMemberSelection} from '/member-picker.js';
 import {connectionNotices} from '/notices.js';
 import {createPreferenceController} from '/preferences.js';
-const $=id=>document.getElementById(id);let state={items:[]},draftSelection=null,onlyPinned=false,editing=null,memberEditing=null,revision=0;
-const labels={disconnected:'未连接',connecting:'正在连接',waiting:'等待 Debug',running:'● 目标运行中',halted:'● 目标已暂停',demo:'● 演示模式',error:'连接异常 / 重试中'};
-async function api(path,data){const context=data.sessionId??state.sessionId;revision++;for(let attempt=0;attempt<40;attempt++){const r=await fetch('/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Keil-Client':'1'},body:JSON.stringify({...data,sessionId:context,...(['write','toggle'].includes(path)?{sessionKey:data.sessionKey??state.sessionKey}:{})})});const b=await r.json();if(r.status===409){await new Promise(r=>setTimeout(r,150));continue;}if(!r.ok)throw Error(b.error||'请求失败');revision++;state=b;if(['write','toggle','display','selection'].includes(path))render();return b;}throw Error('Keil 正忙，请稍后重试');}
+const $=id=>document.getElementById(id);let state={items:[]},draftSelection=null,onlyPinned=false,editing=null,memberEditing=null,revision=0,connectionError='',serviceError='';
+const labels={disconnected:'未连接',connecting:'正在连接',waiting:'等待 Debug',running:'● 目标运行中',halted:'● 目标已暂停',error:'连接异常 / 重试中'};
+async function api(path,data,{signal}={}){const context=data.sessionId??state.sessionId;revision++;for(let attempt=0;attempt<40;attempt++){signal?.throwIfAborted();const r=await fetch('/api/'+path,{method:'POST',signal,headers:{'Content-Type':'application/json','X-Keil-Client':'1'},body:JSON.stringify({...data,sessionId:context,...(['write','toggle'].includes(path)?{sessionKey:data.sessionKey??state.sessionKey}:{})})});const b=await r.json();signal?.throwIfAborted();if(r.status===409){await new Promise(r=>setTimeout(r,150));continue;}if(!r.ok)throw Error(b.error||'请求失败');revision++;state=b;if(['write','toggle','display','selection'].includes(path))render();return b;}throw Error('Keil 正忙，请稍后重试');}
 function error(e){$('error').textContent=e.message;}
 function element(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;}
 function configs(){return state.items.map(({name,min,max,step,pinned,members,hex,visibleMembers})=>({name,min,max,step,pinned,...(members?{members}:{}),...(hex!==undefined?{hex}:{}),...(visibleMembers!==undefined?{visibleMembers}:{})}));}
@@ -21,7 +21,7 @@ const visibility=new IntersectionObserver(entries=>{for(const entry of entries){
 function render(){
  if(renderedSession!==state.sessionId){for(const entry of cardsByName.values()){entry.controls.forEach(c=>c.dispose());visibility.unobserve(entry.card);entry.card.remove();}cardsByName.clear();visibleRoots.clear();lastPriority='';layoutController.replace(state.layout);renderedSession=state.sessionId;bulkPicker=null;for(const id of ['editor','membersDialog','selectionDialog'])if($(id).open)$(id).close();}
 
- $('status').textContent=labels[state.status]||state.status;$('error').textContent=connectionNotices(state).error;$('count').textContent=`${state.items.length} 个变量`;$('session').textContent=state.mode==='demo'?'演示数据 · 不连接硬件':'127.0.0.1 · UVSOCK';$('project').textContent=state.projectPath||'尚未选择工程 · 连接窗口自动识别，或点击更换来源';renderSessions();preferenceController.reconcile(state.preferences);
+ $('status').textContent=serviceError?'工具服务不可用':labels[state.status]||state.status;$('error').textContent=serviceError||connectionError||connectionNotices(state).error;$('count').textContent=`${state.items.length} 个变量`;$('project').textContent=state.projectPath||'尚未选择工程 · 连接窗口自动识别，或点击更换来源';renderSessions();renderConnection();preferenceController.reconcile(state.preferences);
  const query=$('search').value.toLowerCase(),items=state.items.filter(v=>(!onlyPinned||v.pinned)&&v.name.toLowerCase().includes(query));
  const cards=$('cards');
  cards.querySelector('.empty')?.remove();
@@ -43,7 +43,7 @@ function render(){
    const controlSession={sessionKey:state.sessionKey,sessionId:state.sessionId};const controls=rows.map(row=>createControl(row,{root:v.name,api:(path,data)=>api(path,{...data,...controlSession}),settings:current=>{memberEditing=v.children?{root:v.name,name:current.name}:null;void openEditor(current);}}));const body=element('div','widget-body');for(const control of controls)body.append(control.element);card.append(body);
    entry={card,controls,signature};card.dataset.root=v.name;cardsByName.set(v.name,entry);cards.append(card);visibility.observe(card);
   }
-  entry.controls.forEach((control,i)=>control.update({...rows[i],editable:rows[i].editable&&connectionSwitch.pending===null&&['running','halted','demo'].includes(state.status)}));
+  entry.controls.forEach((control,i)=>control.update({...rows[i],editable:rows[i].editable&&!serviceError&&connectionSwitch.pending===null&&state.mode==='keil'&&['running','halted'].includes(state.status)}));
   entry.card.querySelector(':scope > .type').textContent=groupType(v,rows);
  }
  items.forEach((item,index)=>{const card=cardsByName.get(item.name).card;if(cards.children[index]!==card)cards.insertBefore(card,cards.children[index]||null);});
@@ -129,9 +129,10 @@ async function loadMembers(name,container,offset=0){
 }
 $('browseInput').onclick=()=>openMembers($('name').value.trim());$('browseRoot').onclick=()=>{const name=$('memberRoot').value.trim();$('memberTree').replaceChildren();void loadMembers(name,$('memberTree'));};$('closeMembers').onclick=()=>$('membersDialog').close();
 $('add').onclick=()=>{memberEditing=null;void openEditor();};$('cancel').onclick=()=>$('editor').close();$('form').onsubmit=async e=>{e.preventDefault();try{const item={name:$('name').value.trim(),min:Number($('min').value),max:Number($('max').value),step:Number($('step').value),pinned:$('pinned').checked,visibleMembers:draftVisibleMembers};let next=configs();if(memberEditing){const parent=next.find(v=>v.name===memberEditing.root);if(!parent)throw Error('变量已被移除');parent.members={...parent.members,[memberEditing.name]:{...parent.members?.[memberEditing.name],min:item.min,max:item.max,step:item.step}};}else if(editing)next=replaceConfiguredItem(next,editing,item);else next.push(item);const rename=editing&&!memberEditing&&editing!==item.name?{from:editing,to:item.name,layout:layoutController.capture()}:null;await api('items',{items:next,...(rename?{rename}:{}),...(!editing?{remember:item}:{})});$('editor').close();memberEditing=null;render();}catch(e){$('formError').textContent=e.message;}};
-const connectionSwitch=createSessionSwitch({connect:request=>api('connect',request),onChange:()=>{$('connect').disabled=connectionSwitch.pending!==null;render();}});
-async function connectSession(){const chosen=$('instance').value;draftSelection=chosen;try{await connectionSwitch.select({mode:$('mode').value,port:chosen==='auto'?Number($('port').value):Number(chosen),selection:chosen});}catch(e){error(e);}finally{if(connectionSwitch.pending===null)draftSelection=null;render();}}
-$('connect').onclick=connectSession;$('instance').onchange=()=>{draftSelection=$('instance').value;if(state.mode==='keil')void connectSession();};
+const connectionSwitch=createSessionSwitch({connect:(request,signal)=>api('connect',request,{signal}),onChange:render});
+function renderConnection(){const view=connectionView({...state,serviceError},connectionSwitch.pendingRequest);$('connect').textContent=view.button;$('connect').dataset.connected=String(view.connected);$('connect').disabled=connectionSwitch.pendingRequest?.mode==='disconnected';$('connect').title=view.action==='disconnect'?'断开工具连接，不退出 Keil Debug':'连接所选 Keil 窗口';$('connectionLed').dataset.light=view.light;$('connectionText').textContent=view.text;$('connectionState').setAttribute('aria-label',view.text);$('cancelConnection').hidden=!view.cancel;}
+async function connectSession(mode='keil'){const chosen=$('instance').value;draftSelection=chosen;connectionError='';try{await connectionSwitch.select({mode,port:chosen==='auto'?Number($('port').value):Number(chosen),selection:chosen});}catch(e){if(e.name!=='AbortError')connectionError=e.message;}finally{if(connectionSwitch.pending===null)draftSelection=null;render();}}
+$('connect').onclick=()=>void connectSession(connectionView({...state,serviceError},connectionSwitch.pendingRequest).action==='disconnect'?'disconnected':'keil');$('cancelConnection').onclick=()=>void connectSession('disconnected');$('instance').onchange=()=>{draftSelection=$('instance').value;if(state.mode==='keil'||connectionSwitch.pendingRequest?.mode==='keil')void connectSession();};
 $('refreshSessions').onclick=async()=>{try{$('refreshSessions').disabled=true;await api('sessions',{port:Number($('port').value)});render();}catch(e){error(e);}finally{$('refreshSessions').disabled=!!state.discovering;}};
 
 $('interval').onchange=async()=>{try{await api('interval',{interval:Number($('interval').value)});}catch(e){error(e);}};
@@ -148,10 +149,9 @@ function renderSessions(){$('refreshSessions').disabled=!!state.discovering;$('r
  $('connectedTarget').textContent=state.session?'当前窗口：'+state.session.title+' · 端口 '+state.session.port:'选择正在调试的 Keil 窗口后自动识别工程';
  $('sessionHint').textContent=connectionNotices(state).warning;}
 const preferenceController=createPreferenceController({save:async patch=>(await api('preferences',{preferences:patch})).preferences,onChange:applyPreferences,onError:error});
-function applyPreferences(p){const key=JSON.stringify(p);if(key===prefsApplied)return;prefsApplied=key;document.documentElement.dataset.theme=p.theme;document.body.classList.toggle('sidebar-collapsed',p.collapsed);for(const button of document.querySelectorAll('.theme-swatch'))button.setAttribute('aria-pressed',String(button.dataset.theme===p.theme));$('guide').open=p.guideOpen;$('sidebarToggle').setAttribute('aria-expanded',String(!p.collapsed));$('sidebarToggle').setAttribute('aria-label',p.collapsed?'展开侧栏':'收起侧栏');$('sidebarToggle').title=p.collapsed?'展开侧栏':'收起侧栏';}
+function applyPreferences(p){const key=JSON.stringify(p);if(key===prefsApplied)return;prefsApplied=key;document.documentElement.dataset.theme=p.theme;document.body.classList.toggle('sidebar-collapsed',p.collapsed);for(const button of document.querySelectorAll('.theme-swatch'))button.setAttribute('aria-pressed',String(button.dataset.theme===p.theme));$('guide').hidden=p.guideDismissed;$('guide').open=p.guideOpen;$('sidebarToggle').setAttribute('aria-expanded',String(!p.collapsed));$('sidebarToggle').setAttribute('aria-label',p.collapsed?'展开侧栏':'收起侧栏');$('sidebarToggle').title=p.collapsed?'展开侧栏':'收起侧栏';}
 function setPreference(patch){preferenceController.set(patch);}
 for(const button of document.querySelectorAll('.theme-swatch'))button.onclick=()=>setPreference({theme:button.dataset.theme});$('sidebarToggle').onclick=()=>setPreference({collapsed:!preferenceController.current.collapsed});
-$('guideDone').onclick=()=>void setPreference({guideOpen:false});$('help').onclick=()=>{void setPreference({guideOpen:true});$('guide').scrollIntoView({behavior:'smooth',block:'start'});};
+$('guideDone').onclick=()=>void setPreference({guideOpen:false});$('guideClose').onclick=event=>{event.preventDefault();event.stopPropagation();setPreference({guideOpen:false,guideDismissed:true});};$('help').onclick=()=>{setPreference({guideOpen:true,guideDismissed:false});$('guide').scrollIntoView({behavior:'smooth',block:'start'});};
 $('guide').ontoggle=()=>{if($('guide').open!==preferenceController.current.guideOpen)setPreference({guideOpen:$('guide').open});};
-$('demoStart').onclick=()=>{$('mode').value='demo';void connectSession();};
-async function tick(){try{const version=revision;const r=await fetch('/api/state');if(!r.ok)throw Error('服务不可用');const result=await r.json();if(version===revision){state=result;render();}}catch(e){error(e);}setTimeout(tick,500);}tick();
+async function tick(){try{const version=revision;const r=await fetch('/api/state');if(!r.ok)throw Error('服务不可用');const result=await r.json();serviceError='';if(version===revision){state=result;render();}}catch(e){serviceError='无法连接本地工具服务：'+e.message;render();}setTimeout(tick,500);}tick();

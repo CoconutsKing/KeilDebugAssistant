@@ -69,8 +69,11 @@ test('HTTP edits/deletion and sampling remain responsive during a slow window sc
   const interfaceStart=performance.now();await Promise.all([
    post('preferences',{preferences:{collapsed:true}}),post('preferences',{preferences:{theme:'dark'}}),post('preferences',{preferences:{guideOpen:false}})
   ]);assert.ok(performance.now()-interfaceStart<700,'interface preferences waited for the held Keil read');assert.equal(state.busy,true,'target read should still be blocked');
-  const panel=JSON.parse(await readFile(join(dir,'userdata/panel.json'),'utf8'));assert.deepEqual(panel.preferences,{theme:'dark',collapsed:true,guideOpen:false});assert.equal(panel.items[0].name,'buffer');assert.equal(panel.items[0].members['buffer[1]'].hex,true);assert.deepEqual(panel.layout,layout);
-  holdReads=false;for(const reply of heldReads.splice(0))reply();
+  const panel=JSON.parse(await readFile(join(dir,'userdata/panel.json'),'utf8'));assert.deepEqual(panel.preferences,{theme:'dark',collapsed:true,guideOpen:false,guideDismissed:false});assert.equal(panel.items[0].name,'buffer');assert.equal(panel.items[0].members['buffer[1]'].hex,true);assert.deepEqual(panel.layout,layout);
+  const priorSession=state.sessionId,disconnectStart=performance.now();await post('connect',{mode:'disconnected'});assert.ok(performance.now()-disconnectStart<700,'disconnect waited for target I/O');assert.equal(state.mode,'disconnected');assert.equal(state.status,'disconnected');assert.notEqual(state.sessionId,priorSession);assert.equal(state.session,null);assert.ok(state.items[0].children.every(row=>!row.updated&&!row.value));
+  await until(()=>sockets.size===0);const readCount=reads.length;await new Promise(r=>setTimeout(r,350));await post('sessions',{port});assert.equal(state.mode,'disconnected');assert.equal(sockets.size,0);assert.equal(reads.length,readCount,'manual disconnect resumed reading');
+  holdReads=false;heldReads.length=0;
+  await post('connect',{mode:'keil',port,selection:String(port)});await until(s=>s.status==='running'&&s.items[0]?.children?.some(row=>row.updated));assert.deepEqual(state.layout,layout);assert.equal(state.items[0].members['buffer[1]'].hex,true);
   const stopped=spawn(process.execPath,['scripts/stop.mjs'],{cwd:dir,stdio:'ignore'});assert.equal((await once(stopped,'exit'))[0],0);
  }finally{
   if(child&&child.exitCode===null){child.kill();await once(child,'exit');}for(const socket of sockets)socket.destroy();await Promise.all([keil,second].map(server=>new Promise(r=>server.close(r))));
