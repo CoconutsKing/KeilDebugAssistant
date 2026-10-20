@@ -9,7 +9,7 @@ import net from 'node:net';
 import {packet,sstr} from '../app/lib/uvsock.mjs';
 
 test('HTTP edits/deletion and sampling remain responsive during a slow window scan; transient reads recover',async()=>{
- const dir=await mkdtemp(join(tmpdir(),'keil-assistant-test-')),sockets=new Set(),reads=[];let child,readError=false,actualValue=7;
+ const dir=await mkdtemp(join(tmpdir(),'keil-assistant-test-')),sockets=new Set(),reads=[],heldReads=[];let child,readError=false,actualValue=7,holdReads=false;
  const handle=socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));let pending=Buffer.alloc(0);
   socket.on('data',data=>{pending=Buffer.concat([pending,data]);while(pending.length>=32&&pending.length>=pending.readUInt32LE()){
    const frame=pending.subarray(0,pending.readUInt32LE());pending=pending.subarray(frame.length);const cmd=frame.readUInt32LE(4);let status=0,value=Buffer.alloc(0);
@@ -17,7 +17,7 @@ test('HTTP edits/deletion and sampling remain responsive during a slow window sc
    if(cmd===0x202b){value=Buffer.alloc(1060);value.writeInt32LE(17);value.writeUInt32LE(1,16);sstr('0x7').copy(value,20);sstr('int').copy(value,280);sstr('gain').copy(value,540);sstr('gain').copy(value,800);}
    if(cmd===0x202f)actualValue=Number(frame.subarray(52,52+frame.readUInt32LE(48)-1).toString());
    if(cmd===0x200a){reads.push(frame.subarray(48,48+frame.readUInt32LE(44)-1).toString());if(readError)status=13;else{value=Buffer.alloc(12);value.writeUInt32LE(4);value.writeInt32LE(actualValue,4);}}
-   const response=Buffer.alloc(8+value.length);response.writeUInt32LE(cmd);response.writeUInt32LE(status,4);value.copy(response,8);socket.write(packet(0x3000,response));
+   const response=Buffer.alloc(8+value.length);response.writeUInt32LE(cmd);response.writeUInt32LE(status,4);value.copy(response,8);const reply=()=>socket.write(packet(0x3000,response));if(cmd===0x200a&&holdReads)heldReads.push(reply);else reply();
   }});
  };
  const keil=net.createServer(handle),second=net.createServer(handle);
@@ -65,6 +65,12 @@ test('HTTP edits/deletion and sampling remain responsive during a slow window sc
   assert.deepEqual(JSON.parse(await readFile(join(dir,'userdata/panel.json'),'utf8')).items[0].visibleMembers,[]);
   const denied=await fetch(base+'/api/write',{method:'POST',headers:{'Content-Type':'application/json','X-Keil-Client':'1'},body:JSON.stringify({root:'buffer',name:'buffer[1]',value:5,sessionKey:state.sessionKey,sessionId:state.sessionId})});assert.equal(denied.status,400);assert.match((await denied.json()).error,/不属于/);
   await post('selection',{root:'buffer',members:null});assert.equal(state.items[0].children.length,80);assert.equal(state.items[0].visibleMembers,undefined);assert.equal(state.items[0].members['buffer[1]'].hex,true);assert.deepEqual(state.layout,layout);
+  holdReads=true;await until(()=>heldReads.length>0);assert.equal(state.busy,true);
+  const interfaceStart=performance.now();await Promise.all([
+   post('preferences',{preferences:{collapsed:true}}),post('preferences',{preferences:{theme:'dark'}}),post('preferences',{preferences:{guideOpen:false}})
+  ]);assert.ok(performance.now()-interfaceStart<700,'interface preferences waited for the held Keil read');assert.equal(state.busy,true,'target read should still be blocked');
+  const panel=JSON.parse(await readFile(join(dir,'userdata/panel.json'),'utf8'));assert.deepEqual(panel.preferences,{theme:'dark',collapsed:true,guideOpen:false});assert.equal(panel.items[0].name,'buffer');assert.equal(panel.items[0].members['buffer[1]'].hex,true);assert.deepEqual(panel.layout,layout);
+  holdReads=false;for(const reply of heldReads.splice(0))reply();
   const stopped=spawn(process.execPath,['scripts/stop.mjs'],{cwd:dir,stdio:'ignore'});assert.equal((await once(stopped,'exit'))[0],0);
  }finally{
   if(child&&child.exitCode===null){child.kill();await once(child,'exit');}for(const socket of sockets)socket.destroy();await Promise.all([keil,second].map(server=>new Promise(r=>server.close(r))));

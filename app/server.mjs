@@ -39,7 +39,12 @@ async function readLive(name){
 try{let raw;try{raw=await readFile(config,'utf8');}catch(e){if(e.code!=='ENOENT')throw e;raw=await readFile(new URL('panel.json',home),'utf8');}const c=JSON.parse(raw);profiles=c.profiles||{};prefs=validatePreferences(c.preferences||{});items=c.items.map(validateItem);projectPath=c.projectPath||'';sessionKey=c.sessionKey||(projectPath?projectPath.replace(/\.uvoptx$/i,'.uvprojx').toLowerCase():'');if(c.defaults||items.length){const d=validateItem({name:'defaults',...(c.defaults||items.at(-1))});defaults={min:d.min,max:d.max,step:d.step,pinned:d.pinned};}excluded=new Set(c.excluded||[]);if(c.layout)layout=validateLayout(c.layout);if(c.writeHistory&&typeof c.writeHistory==='object'&&!Array.isArray(c.writeHistory))writeHistory=c.writeHistory;}catch{}
 function panelData(){return {items,projectPath,defaults,layout,writeHistory,excluded:[...excluded]};}
 function applyPanel(c={}){items=(c.items||[]).map(validateItem);projectPath=c.projectPath||'';defaults=c.defaults||{min:0,max:100,step:1,pinned:true};layout=c.layout?validateLayout(c.layout):{mode:'grid',widgets:{}};writeHistory=c.writeHistory||{};excluded=new Set(c.excluded||[]);values.clear();groupPlans.clear();catalog=null;catalogError='';catalogChecked=0;lastXml='';activeRoots=[];sampleCursor=0;}
-async function save(){if(sessionKey)profiles[sessionKey]=panelData();const tmp=new URL('panel.json.tmp',userRoot);await writeFile(tmp,JSON.stringify({...panelData(),sessionKey,profiles,preferences:prefs},null,2));await rename(tmp,config);}
+let saveQueue=Promise.resolve();
+function save(){
+ if(sessionKey)profiles[sessionKey]=panelData();
+ const data=JSON.stringify({...panelData(),sessionKey,profiles,preferences:prefs},null,2),tmp=new URL('panel.json.tmp',userRoot);
+ const result=saveQueue.catch(()=>{}).then(async()=>{await writeFile(tmp,data);await rename(tmp,config);});saveQueue=result;return result;
+}
 async function activateSession(info){if(!sessionInfo||sessionInfo.port!==info.port||sessionInfo.pid!==info.pid||sessionInfo.project!==info.project){sessionId=randomUUID();values.clear();}const next=info.project?info.project.toLowerCase():'port:'+info.port;if(next!==sessionKey){if(sessionKey)profiles[sessionKey]=panelData();const same=projectPath&&info.project&&projectPath.replace(/\.uvoptx$/i,'.uvprojx').toLowerCase()===info.project.toLowerCase();if(profiles[next])applyPanel(profiles[next]);else if(!same)applyPanel();sessionKey=next;projectPath=info.project?info.project.replace(/\.uvprojx?$/i,'.uvoptx'):projectPath;await save();}sessionInfo=info;client=pool.clients.get(info.port);keilPort=info.port;}
 
 const demo={ 'motor.target_rpm':1200,'motor.actual_rpm':1187,'pid.kp':1.2,'pid.ki':0.08,'motor.enabled':1,'board.temperature':36.5};
@@ -68,7 +73,7 @@ async function poll(){if(shuttingDown)return;if(busy){setTimeout(poll,interval);
   }
 }catch(e){lastError=e.message;status='error';}finally{busy=false;setTimeout(poll,interval);}}
 let keilPort=4823;
-function snapshot(){return {version:'2.0.5',preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name),rows=rowsFor(v);return {...v,...values.get(v.name),...(plan.group?{...((mode==='demo'?demoRead(v.name):catalog?.describe(v.name))||{}),value:'',editable:false,children:rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),totalMembers:plan.rows.length,missingMembers:v.visibleMembers?.filter(name=>!rows.some(row=>row.name===name))||[],truncated:plan.truncated}:{}),name:v.name,history:historyFor(v.name)};})};}
+function snapshot(){return {version:'2.0.6',preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name),rows=rowsFor(v);return {...v,...values.get(v.name),...(plan.group?{...((mode==='demo'?demoRead(v.name):catalog?.describe(v.name))||{}),value:'',editable:false,children:rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),totalMembers:plan.rows.length,missingMembers:v.visibleMembers?.filter(name=>!rows.some(row=>row.name===name))||[],truncated:plan.truncated}:{}),name:v.name,history:historyFor(v.name)};})};}
 async function body(req){let data='';for await(const chunk of req){data+=chunk;if(data.length>1024*1024)throw Error('请求过大');}return JSON.parse(data||'{}');}
 const server=http.createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');
@@ -84,6 +89,11 @@ const server=http.createServer(async(req,res)=>{
       if(path==='/api/shutdown'){
         if(b.token!==shutdownToken)throw Error('关闭凭证无效');
         res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true}));void shutdown();return;
+      }
+      // Interface preferences do not use Keil and must never wait for target I/O.
+      if(path==='/api/preferences'){
+        prefs=validatePreferences({...prefs,...b.preferences});await save();
+        res.setHeader('Content-Type','application/json');res.end(JSON.stringify(snapshot()));return;
       }
       if(busy){interactionRequested=true;res.writeHead(409);return res.end(JSON.stringify({error:'正在采样，请稍后重试'}));}busy=true;interactionRequested=false;
       try{
@@ -102,7 +112,6 @@ const server=http.createServer(async(req,res)=>{
           if(mode==='demo'&&!items.length)items=Object.keys(demo).map(name=>validateItem({name,min:0,max:name.includes('rpm')?5000:name.includes('enabled')?1:100,step:name.includes('pid')?0.01:1,pinned:name!=='motor.actual_rpm'}));
           if(mode==='disconnected')status='disconnected';
         }else if(path==='/api/sessions'){await pool.refresh(Number(b.port)||keilPort,true);
-        }else if(path==='/api/preferences'){prefs=validatePreferences({...prefs,...b.preferences});
         }else if(path==='/api/display'){
           if(typeof b.hex!=='boolean')throw Error('十六进制显示设置无效');
           const item=items.find(v=>v.name===b.root);

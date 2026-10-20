@@ -5,6 +5,7 @@ import {searchVariables} from '/search.js';
 import {sessionChoices,createSessionSwitch} from '/session-picker.js';
 import {createMemberSelection} from '/member-picker.js';
 import {connectionNotices} from '/notices.js';
+import {createPreferenceController} from '/preferences.js';
 const $=id=>document.getElementById(id);let state={items:[]},draftSelection=null,onlyPinned=false,editing=null,memberEditing=null,revision=0;
 const labels={disconnected:'未连接',connecting:'正在连接',waiting:'等待 Debug',running:'● 目标运行中',halted:'● 目标已暂停',demo:'● 演示模式',error:'连接异常 / 重试中'};
 async function api(path,data){const context=data.sessionId??state.sessionId;revision++;for(let attempt=0;attempt<40;attempt++){const r=await fetch('/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Keil-Client':'1'},body:JSON.stringify({...data,sessionId:context,...(['write','toggle'].includes(path)?{sessionKey:data.sessionKey??state.sessionKey}:{})})});const b=await r.json();if(r.status===409){await new Promise(r=>setTimeout(r,150));continue;}if(!r.ok)throw Error(b.error||'请求失败');revision++;state=b;if(['write','toggle','display','selection'].includes(path))render();return b;}throw Error('Keil 正忙，请稍后重试');}
@@ -20,7 +21,7 @@ const visibility=new IntersectionObserver(entries=>{for(const entry of entries){
 function render(){
  if(renderedSession!==state.sessionId){for(const entry of cardsByName.values()){entry.controls.forEach(c=>c.dispose());visibility.unobserve(entry.card);entry.card.remove();}cardsByName.clear();visibleRoots.clear();lastPriority='';layoutController.replace(state.layout);renderedSession=state.sessionId;bulkPicker=null;for(const id of ['editor','membersDialog','selectionDialog'])if($(id).open)$(id).close();}
 
- $('status').textContent=labels[state.status]||state.status;$('error').textContent=connectionNotices(state).error;$('count').textContent=`${state.items.length} 个变量`;$('session').textContent=state.mode==='demo'?'演示数据 · 不连接硬件':'127.0.0.1 · UVSOCK';$('project').textContent=state.projectPath||'尚未选择工程 · 连接窗口自动识别，或点击更换来源';renderSessions();applyPreferences();
+ $('status').textContent=labels[state.status]||state.status;$('error').textContent=connectionNotices(state).error;$('count').textContent=`${state.items.length} 个变量`;$('session').textContent=state.mode==='demo'?'演示数据 · 不连接硬件':'127.0.0.1 · UVSOCK';$('project').textContent=state.projectPath||'尚未选择工程 · 连接窗口自动识别，或点击更换来源';renderSessions();preferenceController.reconcile(state.preferences);
  const query=$('search').value.toLowerCase(),items=state.items.filter(v=>(!onlyPinned||v.pinned)&&v.name.toLowerCase().includes(query));
  const cards=$('cards');
  cards.querySelector('.empty')?.remove();
@@ -146,10 +147,11 @@ let sessionOptions='',prefsApplied='';
 function renderSessions(){$('refreshSessions').disabled=!!state.discovering;$('refreshSessions').textContent=state.discovering?'正在刷新…':'刷新窗口';const list=state.sessions||[],choice=sessionChoices(list,connectionSwitch.pending??draftSelection??state.selection??'auto',state.session),key=JSON.stringify(choice.options);if(key!==sessionOptions){sessionOptions=key;$('instance').replaceChildren();for(const item of choice.options){const option=new Option(item.label,item.value);option.title=item.title||'';option.disabled=item.disabled;$('instance').append(option);}}$('instance').value=choice.selected;
  $('connectedTarget').textContent=state.session?'当前窗口：'+state.session.title+' · 端口 '+state.session.port:'选择正在调试的 Keil 窗口后自动识别工程';
  $('sessionHint').textContent=connectionNotices(state).warning;}
-function applyPreferences(){const p=state.preferences||{},key=JSON.stringify(p);if(key===prefsApplied)return;prefsApplied=key;document.documentElement.dataset.theme=p.theme||'forest';document.body.classList.toggle('sidebar-collapsed',!!p.collapsed);for(const button of document.querySelectorAll('.theme-swatch'))button.setAttribute('aria-pressed',String(button.dataset.theme===(p.theme||'forest')));$('guide').open=p.guideOpen!==false;$('sidebarToggle').setAttribute('aria-expanded',String(!p.collapsed));$('sidebarToggle').setAttribute('aria-label',p.collapsed?'展开侧栏':'收起侧栏');}
-async function setPreference(patch){try{await api('preferences',{preferences:patch});applyPreferences();}catch(e){error(e);}}
-for(const button of document.querySelectorAll('.theme-swatch'))button.onclick=()=>void setPreference({theme:button.dataset.theme});$('sidebarToggle').onclick=()=>void setPreference({collapsed:!state.preferences?.collapsed});
+const preferenceController=createPreferenceController({save:async patch=>(await api('preferences',{preferences:patch})).preferences,onChange:applyPreferences,onError:error});
+function applyPreferences(p){const key=JSON.stringify(p);if(key===prefsApplied)return;prefsApplied=key;document.documentElement.dataset.theme=p.theme;document.body.classList.toggle('sidebar-collapsed',p.collapsed);for(const button of document.querySelectorAll('.theme-swatch'))button.setAttribute('aria-pressed',String(button.dataset.theme===p.theme));$('guide').open=p.guideOpen;$('sidebarToggle').setAttribute('aria-expanded',String(!p.collapsed));$('sidebarToggle').setAttribute('aria-label',p.collapsed?'展开侧栏':'收起侧栏');$('sidebarToggle').title=p.collapsed?'展开侧栏':'收起侧栏';}
+function setPreference(patch){preferenceController.set(patch);}
+for(const button of document.querySelectorAll('.theme-swatch'))button.onclick=()=>setPreference({theme:button.dataset.theme});$('sidebarToggle').onclick=()=>setPreference({collapsed:!preferenceController.current.collapsed});
 $('guideDone').onclick=()=>void setPreference({guideOpen:false});$('help').onclick=()=>{void setPreference({guideOpen:true});$('guide').scrollIntoView({behavior:'smooth',block:'start'});};
-$('guide').ontoggle=()=>{if(state.preferences&&$('guide').open!==state.preferences.guideOpen)void setPreference({guideOpen:$('guide').open});};
+$('guide').ontoggle=()=>{if($('guide').open!==preferenceController.current.guideOpen)setPreference({guideOpen:$('guide').open});};
 $('demoStart').onclick=()=>{$('mode').value='demo';void connectSession();};
 async function tick(){try{const version=revision;const r=await fetch('/api/state');if(!r.ok)throw Error('服务不可用');const result=await r.json();if(version===revision){state=result;render();}}catch(e){error(e);}setTimeout(tick,500);}tick();
