@@ -51,13 +51,13 @@ function demoRead(name){
   return {name,value:String(value),type:name.includes('pid')||name.includes('temperature')||name.includes('samples')||name.endsWith('.gain')?'float':'int',count:0,aggregate:false,array:false,editable:true};
 }
 async function syncProject(){if(!projectPath)return;const xml=await readFile(projectPath,'utf8');if(xml===lastXml)return;lastXml=xml;for(const name of watchNames(xml))if(!excluded.has(name)&&!items.some(v=>v.name===name))items.push(validateItem({name}));await save();}
-async function sample(name){try{const value=mode==='demo'?demoRead(name):await readLive(name);values.set(name,{...value,updated:Date.now()});}catch(e){values.set(name,{error:e.message,editable:false});if(mode==='keil'&&client?.socket?.destroyed){client=null;throw e;}}}
+async function sample(name){try{const value=mode==='demo'?demoRead(name):await readLive(name);values.set(name,{...value,updated:Date.now()});}catch(e){values.set(name,{...values.get(name),error:e.message,editable:false});if(mode==='keil'&&client?.socket?.destroyed){client=null;throw e;}}}
 async function samplePanel(){const active=items.filter(item=>activeRoots.includes(item.name));const selected=active.length&&++sampleRound%10!==0?active:items;const names=[...new Set(selected.flatMap(item=>{const plan=planFor(item.name);return plan.rows.length?plan.rows.map(v=>v.name):[item.name];}))];if(!names.length)return;const budget=mode==='demo'?names.length:8;for(let i=0;i<Math.min(budget,names.length);i++){sampleCursor%=names.length;await sample(names[sampleCursor++]);if(interactionRequested)break;}}
 async function poll(){if(shuttingDown)return;if(busy){setTimeout(poll,interval);return;}busy=true;try{
   if(mode!=='keil')await syncProject();
   if(mode==='demo'){status='demo';await samplePanel();lastError='';}
   else if(mode==='keil'){
-    const sessions=await pool.refresh(keilPort);const selected=chooseSession(sessions,sessionInfo?.port,selection);
+    const sessions=await pool.refresh(keilPort);if(selection==='auto'&&!pool.hasDiscovered){status='connecting';lastError='正在后台识别 Keil 窗口…';return;}const selected=chooseSession(sessions,sessionInfo?.port,selection);
     if(!selected||!['running','halted'].includes(selected.status)){if(selected&&selected.status==='waiting')await activateSession(selected);status='waiting';values.clear();lastError=pool.error||'等待 Debug：请在目标 Keil 窗口进入调试。多窗口需使用不同 UVSOCK 端口；无端口窗口请按新手教程配置。';return;}
     await activateSession(selected);status=selected.status;
     try{await syncProject();}catch(e){catalogError='Watch 文件暂不可用：'+e.message;}
@@ -65,7 +65,7 @@ async function poll(){if(shuttingDown)return;if(busy){setTimeout(poll,interval);
   }
 }catch(e){lastError=e.message;status='error';}finally{busy=false;setTimeout(poll,interval);}}
 let keilPort=4823;
-function snapshot(){return {version:'2.0.0',preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,mode,status,lastError,defaults,layout,compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name);return {...v,...values.get(v.name),...(plan.rows.length?{...((mode==='demo'?demoRead(v.name):catalog?.describe(v.name))||{}),value:'',editable:false,children:plan.rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),truncated:plan.truncated}:{}),name:v.name,history:historyFor(v.name)};})};}
+function snapshot(){return {version:'2.0.1',preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name);return {...v,...values.get(v.name),...(plan.rows.length?{...((mode==='demo'?demoRead(v.name):catalog?.describe(v.name))||{}),value:'',editable:false,children:plan.rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),truncated:plan.truncated}:{}),name:v.name,history:historyFor(v.name)};})};}
 async function body(req){let data='';for await(const chunk of req){data+=chunk;if(data.length>1024*1024)throw Error('请求过大');}return JSON.parse(data||'{}');}
 const server=http.createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');
@@ -152,7 +152,7 @@ const server=http.createServer(async(req,res)=>{
           rememberHistory(b.name,toggled?toggled.history:recordInput(historyFor(b.name),requested,before));
         }else if(path==='/api/interval'){if(!Number.isInteger(b.interval)||b.interval<100||b.interval>10000)throw Error('刷新间隔须为 100–10000 ms');interval=b.interval;}
         else throw Error('未知操作');
-        await save();res.setHeader('Content-Type','application/json');res.end(JSON.stringify(snapshot()));
+        if(!['/api/priority','/api/sessions'].includes(path))await save();res.setHeader('Content-Type','application/json');res.end(JSON.stringify(snapshot()));
       }finally{busy=false;}return;
     }
     const files={'/':'index.html','/app.js':'app.js','/controls.js':'controls.js','/layout.js':'layout.js','/editor.js':'editor.js','/search.js':'search.js','/style.css':'style.css','/keil.ico':'keil.ico','/preferences.js':'preferences.js'};if(req.method!=='GET'||!files[path]){res.writeHead(404);return res.end();}

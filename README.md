@@ -1,4 +1,6 @@
-# Keil Debug Assistant V2.0
+# Keil Debug Assistant V2.0.1
+
+V2.0.1 修复后台窗口识别导致的采样、更新与删除卡顿，并支持瞬时读失败自动恢复。
 
 作者：oyhy。Keil µVision 本地变量监视与滑条调参工具。
 
