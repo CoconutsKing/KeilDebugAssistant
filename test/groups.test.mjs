@@ -20,3 +20,19 @@ test('focused controls refresh actual values immediately while unsubmitted numer
  const prior=globalThis.document;const doc={activeElement:null,createElement:tag=>new Node(tag)};globalThis.document=doc;
  try{const initial={name:'pid.kp',value:'1',type:'float',editable:true,min:0,max:5,step:0.1,updated:Date.now()};const control=createControl(initial,{root:'pid',settings(){},api:async()=>({items:[{name:'pid',children:[{...initial,value:'2.125'}]}]})});const controls=control.element.children[1],range=controls.children[1],input=controls.children[3],write=controls.children[4],actual=control.element.children[0].children[1];doc.activeElement=range;control.update({...initial,value:'3'});assert.equal(actual.textContent,'3');assert.equal(input.value,'3');doc.activeElement=input;input.value='2';input.oninput();control.update({...initial,value:'4'});assert.equal(actual.textContent,'4');assert.equal(input.value,'2');write.onclick();await new Promise(r=>setTimeout(r,10));assert.equal(actual.textContent,'2.125');assert.equal(input.value,'2.125');assert.equal(doc.activeElement,input);control.dispose();}finally{globalThis.document=prior;}
 });
+
+test('scalar and member rows keep syncing after write/toggle, normalize hex inputs, and preserve drafts and history',async()=>{
+ class Node {constructor(tag){this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.value='';}append(...nodes){this.children.push(...nodes);}setAttribute(){}addEventListener(){}}
+ const prior=globalThis.document;globalThis.document={createElement:tag=>new Node(tag)};
+ try{for(const name of ['target','pid.kp','samples[2]']){
+  const root=name==='pid.kp'?'pid':name==='samples[2]'?'samples':name,history={previous:3,current:21,selected:'current'};
+  const initial={name,value:'0x15',type:'float',editable:true,min:0,max:100,step:1,updated:100,history};
+  const control=createControl(initial,{root,settings(){},api:async(path,data)=>{const actual={...initial,value:String(path==='toggle'?3:data.value),updated:200};return {items:[root===name?actual:{name:root,children:[actual]}]};}});
+  const [label,controls,,message]=control.element.children,range=controls.children[1],input=controls.children[3],write=controls.children[4],toggle=controls.children[5];
+  control.update(initial);assert.equal(input.value,'21');assert.equal(range.value,'21');
+  input.value='12';input.oninput();write.onclick();await new Promise(r=>setTimeout(r,0));assert.equal(message.textContent,'实际值：12');
+  control.update({...initial,value:'0x1a',updated:300});assert.equal(label.children[1].textContent,'0x1a');assert.equal(input.value,'26');assert.equal(range.value,'26');assert.equal(message.textContent,'实际值：0x1a');assert.equal(toggle.textContent,'⇄ 切换到 3');
+  input.value='18';input.oninput();control.update({...initial,value:'27',updated:400});assert.equal(input.value,'18');assert.equal(label.children[1].textContent,'27');assert.equal(range.value,'27');assert.equal(message.textContent,'实际值：27');
+  input.onblur();await toggle.onclick();control.update({...initial,value:'9',updated:500});assert.equal(input.value,'9');assert.equal(range.value,'9');assert.equal(label.children[1].textContent,'9');assert.equal(message.textContent,'实际值：9');control.dispose();
+ }}finally{globalThis.document=prior;}
+});

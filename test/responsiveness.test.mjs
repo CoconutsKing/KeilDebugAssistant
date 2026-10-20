@@ -6,16 +6,17 @@ import {join,resolve,sep} from 'node:path';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import net from 'node:net';
-import {packet} from '../app/lib/uvsock.mjs';
+import {packet,sstr} from '../app/lib/uvsock.mjs';
 
 test('HTTP edits/deletion and sampling remain responsive during a slow window scan; transient reads recover',async()=>{
- const dir=await mkdtemp(join(tmpdir(),'keil-assistant-test-')),sockets=new Set();let child,readError=false;
+ const dir=await mkdtemp(join(tmpdir(),'keil-assistant-test-')),sockets=new Set();let child,readError=false,actualValue=7;
  const handle=socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));let pending=Buffer.alloc(0);
   socket.on('data',data=>{pending=Buffer.concat([pending,data]);while(pending.length>=32&&pending.length>=pending.readUInt32LE()){
    const frame=pending.subarray(0,pending.readUInt32LE());pending=pending.subarray(frame.length);const cmd=frame.readUInt32LE(4);let status=0,value=Buffer.alloc(0);
-   if(cmd===0x000d)status=10;
    if(cmd===0x2004){value=Buffer.alloc(4);value.writeUInt32LE(1);}
-   if(cmd===0x200a){if(readError)status=13;else{value=Buffer.alloc(12);value.writeUInt32LE(4);value.writeInt32LE(7,4);}}
+   if(cmd===0x202b){value=Buffer.alloc(1060);value.writeInt32LE(17);value.writeUInt32LE(1,16);sstr('0x7').copy(value,20);sstr('int').copy(value,280);sstr('gain').copy(value,540);sstr('gain').copy(value,800);}
+   if(cmd===0x202f)actualValue=Number(frame.subarray(52,52+frame.readUInt32LE(48)-1).toString());
+   if(cmd===0x200a){if(readError)status=13;else{value=Buffer.alloc(12);value.writeUInt32LE(4);value.writeInt32LE(actualValue,4);}}
    const response=Buffer.alloc(8+value.length);response.writeUInt32LE(cmd);response.writeUInt32LE(status,4);value.copy(response,8);socket.write(packet(0x3000,response));
   }});
  };
@@ -47,6 +48,11 @@ test('HTTP edits/deletion and sampling remain responsive during a slow window sc
   await post('items',{items:[{name:'gain'}]});await until(s=>s.items[0]?.value==='7');
   readError=true;await until(s=>s.items[0]?.error);assert.equal(state.items[0].value,'7');assert.ok(state.items[0].updated);assert.equal(state.items[0].editable,false);
   readError=false;await until(s=>s.items[0]?.updated&&!s.items[0].error&&s.items[0].editable);assert.equal(state.items[0].value,'7');
+  await post('write',{root:'gain',name:'gain',value:12,sessionKey:state.sessionKey});assert.equal(state.items[0].value,'12');
+  const history=state.items[0].history,writtenAt=state.items[0].updated;
+  actualValue=4;await until(s=>s.items[0]?.value==='4'&&s.items[0].updated>writtenAt);assert.deepEqual(state.items[0].history,history,'external samples must not replace the two user targets');
+  await post('toggle',{root:'gain',name:'gain',sessionKey:state.sessionKey});assert.equal(state.items[0].value,'7');
+  actualValue=19;await until(s=>s.items[0]?.value==='19');await post('toggle',{root:'gain',name:'gain',sessionKey:state.sessionKey});assert.equal(state.items[0].value,'12');
   const stopped=spawn(process.execPath,['scripts/stop.mjs'],{cwd:dir,stdio:'ignore'});assert.equal((await once(stopped,'exit'))[0],0);
  }finally{
   if(child&&child.exitCode===null){child.kill();await once(child,'exit');}for(const socket of sockets)socket.destroy();await Promise.all([keil,second].map(server=>new Promise(r=>server.close(r))));

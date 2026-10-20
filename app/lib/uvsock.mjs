@@ -54,7 +54,22 @@ export class UVSock {
   }
   request(cmd,data){if(this.pending)throw Error('调试请求必须串行');if(!this.socket||this.socket.destroyed)throw Error('尚未连接 Keil');return new Promise((resolve,reject)=>{const timer=setTimeout(()=>this.close(Error('Keil 请求超时，连接已断开以避免迟到响应错配')),5000);this.pending={cmd,resolve,reject,timer};this.socket.write(packet(cmd,data));});}
   async status(){const b=await this.request(0x2004);if(b.length<4)throw Error('状态响应不完整');return b.readUInt32LE(0)?'running':'halted';}
-  async read(name){if(!validName(name))throw Error('无效变量路径');const b=Buffer.alloc(272);b.writeUInt32LE(20);sstr(name).copy(b,12);if(this.legacy)return parseLegacyValue(await this.request(0x200a,b),name);try{return parseVariable(await this.request(0x202b,b));}catch(e){if(e.keilStatus!==28)throw e;this.legacy=true;this.compatibility='扩展 Watch 接口不可用，已切换兼容读取；可输入完整成员路径。';return parseLegacyValue(await this.request(0x200a,b),name);}}
+  async read(name){
+    if(!validName(name))throw Error('无效变量路径');
+    const b=Buffer.alloc(272);sstr(name).copy(b,12);
+    const evaluate=async()=>parseLegacyValue(await this.request(0x200a,b),name);
+    if(this.legacy)return evaluate();
+    let watch;
+    try{watch=parseVariable(await this.request(0x202b,b));}
+    catch(e){if(e.keilStatus!==28)throw e;this.legacy=true;this.compatibility='扩展 Watch 接口不可用，已切换兼容读取；可输入完整成员路径。';return evaluate();}
+    if(watch.aggregate||watch.array||watch.pointer)return watch;
+    // The extended Watch value can stay cached after an IDE edit or while running.
+    // Keep its ID/type for member enumeration and writes, but evaluate each scalar
+    // independently for both polling and write confirmation. Never use a stale
+    // Watch value as a successful read when the live evaluation fails.
+    const actual=await evaluate();
+    return {...watch,value:actual.value,editable:watch.editable&&actual.editable};
+  }
   async members(name){
     if(this.legacy)throw Error('当前 Keil 使用兼容接口，不能枚举成员。可直接添加 joints[0].成员；如需展开，请先退出 Debug，让工具连接后再进入 Debug。');
     const parent=await this.read(name);if(!parent.count&&!parent.aggregate&&!parent.array&&!parent.pointer)return [];

@@ -18,7 +18,7 @@ test('demo array/class browsing, selected member writes, and stop script closes 
   const base=`http://127.0.0.1:${runtime.port}`;
   let sessionId;
   async function post(path,data){for(let i=0;i<30;i++){const response=await fetch(base+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Keil-Client':'1'},body:JSON.stringify({...data,sessionId,...(['write','toggle'].includes(path)?{sessionKey:'demo'}:{})})});const body=await response.json();if(response.status===409){await new Promise(r=>setTimeout(r,30));continue;}assert.ok(response.ok,JSON.stringify(body));sessionId=body.sessionId;return body;}throw Error('Server remained busy');}
-  const fresh=await (await fetch(base+'/api/state')).json();assert.equal(fresh.status,'disconnected');assert.equal(fresh.items.length,0);assert.equal(fresh.projectPath,'');assert.deepEqual(fresh.preferences,{theme:'forest',collapsed:false,guideOpen:true});assert.equal(fresh.version,'2.0.2');
+  const fresh=await (await fetch(base+'/api/state')).json();assert.equal(fresh.status,'disconnected');assert.equal(fresh.items.length,0);assert.equal(fresh.projectPath,'');assert.deepEqual(fresh.preferences,{theme:'forest',collapsed:false,guideOpen:true});assert.equal(fresh.version,'2.0.3');
   for(const route of ['/','/app.js','/style.css','/preferences.js','/session-picker.js','/keil.ico'])assert.equal((await fetch(base+route)).status,200);
   await post('connect',{mode:'demo'});
   let preferencesState=await post('preferences',{preferences:{theme:'dark',collapsed:true,guideOpen:false}});assert.deepEqual(preferencesState.preferences,{theme:'dark',collapsed:true,guideOpen:false});
