@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {parseDwarf} from '../lib/catalog.mjs';
+import {parseDwarf} from '../app/lib/catalog.mjs';
 const dwarf=`
  <0><b>: Abbrev Number: 1 (DW_TAG_compile_unit)
  <1><10>: Abbrev Number: 2 (DW_TAG_variable)

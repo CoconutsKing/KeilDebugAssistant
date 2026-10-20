@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0"
-node stop.mjs
+node scripts\stop.mjs
 if errorlevel 1 pause

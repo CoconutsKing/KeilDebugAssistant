@@ -1,1 +1,15 @@
-{"name":"keil-debug-assistant","version":"1.0.0","author":"oyhy","private":true,"type":"module","scripts":{"start":"node server.mjs","test":"node --test"},"engines":{"node":">=20"}}
+{
+  "name": "keil-debug-assistant",
+  "version": "2.0.0",
+  "author": "oyhy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node app/server.mjs",
+    "test": "node --test",
+    "release": "node scripts/release.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,5 +1,10 @@
+userdata/*
+!userdata/README.md
+data/*
+!data/README.md
 panel.json
 panel.json.tmp
 node_modules/
 research/
 .keil-runtime.json
+dist/

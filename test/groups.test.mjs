@@ -1,8 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {flattenGroup} from '../lib/groups.mjs';
-import {validateItem} from '../lib/model.mjs';
-import {stepValue,createControl} from '../public/controls.js';
+import {flattenGroup} from '../app/lib/groups.mjs';
+import {validateItem} from '../app/lib/model.mjs';
+import {stepValue,createControl} from '../app/public/controls.js';
 test('flatten nested object arrays, preserve pointer rows and limit huge groups',()=>{
  const describe=name=>name==='pid'?{aggregate:true}:name==='pid.gains'?{array:true}:name==='pid.next'?{pointer:true}:{type:'float'};
  const children=name=>name==='pid'?[{name:'pid.gains'},{name:'pid.next'}]:name==='pid.gains'?[{name:'pid.gains[0]'},{name:'pid.gains[1]'}]:[];

@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {recordInput,toggleTarget,validHistory} from '../lib/history.mjs';
-import {UVSock,matchesTarget,numericLiteral} from '../lib/uvsock.mjs';
+import {recordInput,toggleTarget,validHistory} from '../app/lib/history.mjs';
+import {UVSock,matchesTarget,numericLiteral} from '../app/lib/uvsock.mjs';
 test('two-target history toggles repeatedly and new input replaces the inactive target',()=>{
  let h=recordInput(null,10,0);assert.deepEqual(h,{previous:0,current:10,selected:'current'});
  let switched=toggleTarget(h);assert.equal(switched.value,0);h=switched.history;assert.equal(toggleTarget(h).value,10);

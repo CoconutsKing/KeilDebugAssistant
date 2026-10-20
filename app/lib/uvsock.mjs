@@ -31,7 +31,7 @@ export class UVSock {
     await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{this.socket.destroy();reject(Error('连接超时'));},3000);this.socket.once('connect',()=>{clearTimeout(timer);resolve();});this.socket.once('error',e=>{clearTimeout(timer);reject(e);});});
     await this.enableExtended();
   }
-  async enableExtended(){const options=Buffer.alloc(4);options.writeUInt32LE(1);try{await this.request(0x000d,options);this.legacy=false;this.compatibility='';}catch(e){if(![10,28].includes(e.keilStatus))throw e;this.legacy=true;this.compatibility='兼容读取模式：进入 Debug 前连接可启用类成员枚举；退出 Debug 后工具会自动重试。';}}
+  async enableExtended(){const options=Buffer.alloc(4);options.writeUInt32LE(1);try{await this.request(0x000d,options);this.legacy=false;this.compatibility='';}catch(e){if(![10,11,28].includes(e.keilStatus))throw e;this.legacy=true;this.compatibility='兼容读取模式：进入 Debug 前连接可启用类成员枚举；退出 Debug 后工具会自动重试。';}}
   receive(data){
     this.buffer=Buffer.concat([this.buffer,data]);
     while(this.buffer.length>=32){const n=this.buffer.readUInt32LE(0);if(n<32||n>32768)throw Error('无效的 UVSOCK 帧');if(this.buffer.length<n)return;

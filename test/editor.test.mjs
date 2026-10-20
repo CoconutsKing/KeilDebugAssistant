@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {replaceConfiguredItem} from '../public/editor.js';
+import {replaceConfiguredItem} from '../app/public/editor.js';
 test('configured variable can be replaced, dropping old member overrides while preserving explicit settings',()=>{
  const items=[{name:'pid',min:-5,max:5,step:0.1,pinned:true,members:{'pid.kp':{min:0,max:3,step:0.1}}},{name:'samples[0]',min:0,max:10,step:1}];
  const replacement={name:'controllers[1]',min:-5,max:5,step:0.1,pinned:true};const next=replaceConfiguredItem(items,'pid',replacement);

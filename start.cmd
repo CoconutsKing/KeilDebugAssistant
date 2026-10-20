@@ -6,6 +6,5 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-start "" "http://127.0.0.1:3210"
-node server.mjs
+node scripts\start.mjs
 pause
