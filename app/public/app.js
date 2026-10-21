@@ -96,15 +96,17 @@ async function selectVariable(name,depth){
  try{
   const preview=await api('preview',{name,metadataOnly:true});if(version!==selectionVersion)return;const v=preview.selected;$('selectionValue').textContent=`${name} = ${v.pointer?'指针（请选择成员）':v.value}　${v.type||''}`;chooseMembers.hidden=!!memberEditing||!v.array&&!v.aggregate;
   if(!v.array&&!v.aggregate&&!v.pointer)return;
-  const result=await api('members',{name});if(version!==selectionVersion)return;appendMemberSelect(name,result,depth,version);
+  const result=await api('members',{name});if(version!==selectionVersion)return;appendMemberSelect(name,result,depth,version,v);
  }catch(e){if(version===selectionVersion)$('selectionValue').textContent=e.message;}
 }
-function appendMemberSelect(name,result,depth,version){
- const label=element('label','','选择数组元素 / 成员'),select=element('select');const placeholder=element('option','','请选择具体元素或成员');placeholder.value='';select.append(placeholder);
+function appendMemberSelect(name,result,depth,version,meta){
+ const label=element('label'),heading=element('span','member-select-heading'),select=element('select');heading.append(element('span','','选择数组元素 / 成员'));
+ if(!meta.pointer&&(meta.array||meta.aggregate)){const hint=element('span','member-select-hint',meta.array?'不选具体成员，默认调试整个数组；可用批量选择限定范围。':'不选具体成员，默认调试全部成员；可用批量选择限定范围。');hint.id='member-select-hint-'+depth;heading.append(hint);select.setAttribute('aria-describedby',hint.id);}
+ select.setAttribute('aria-label',name+' 选择数组元素 / 成员');label.append(heading);const placeholder=element('option','','请选择具体元素或成员');placeholder.value='';select.append(placeholder);
  for(const member of result.members){const option=element('option','',`${member.name}　${member.value??member.type??''}`);option.value=member.name;select.append(option);}
  if(result.nextOffset!==null){const more=element('option','','下一页…');more.value='__more__';select.append(more);}
  label.append(select);$('variableLevels').append(label);
- select.onchange=async()=>{if(select.value==='__more__'){try{const next=await api('members',{name,offset:result.nextOffset});if(!label.isConnected)return;while($('variableLevels').children.length>depth+1)$('variableLevels').lastElementChild.remove();label.remove();appendMemberSelect(name,next,depth,selectionVersion);}catch(e){$('selectionValue').textContent=e.message;}}else if(select.value)void selectVariable(select.value,depth+1);else void selectVariable(name,depth);};
+ select.onchange=async()=>{if(select.value==='__more__'){try{const next=await api('members',{name,offset:result.nextOffset});if(!label.isConnected)return;while($('variableLevels').children.length>depth+1)$('variableLevels').lastElementChild.remove();label.remove();appendMemberSelect(name,next,depth,selectionVersion,meta);}catch(e){$('selectionValue').textContent=e.message;}}else if(select.value)void selectVariable(select.value,depth+1);else void selectVariable(name,depth);};
 }
 $('variableSearch').oninput=runVariableSearch;$('variableSearchButton').onclick=runVariableSearch;
 $('variableSearch').onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();const matches=runVariableSearch();if(matches.length)chooseSearchResult(matches[0].name);}else if(event.key==='ArrowDown'){event.preventDefault();$('variableSearchResults').querySelector('button')?.focus();}else if(event.key==='Escape'){$('variableSearchResults').hidden=true;event.preventDefault();}};
