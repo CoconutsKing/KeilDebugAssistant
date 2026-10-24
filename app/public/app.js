@@ -6,20 +6,22 @@ import {sessionChoices,createSessionSwitch,connectionView} from '/session-picker
 import {createMemberSelection} from '/member-picker.js';
 import {connectionNotices} from '/notices.js';
 import {createPreferenceController} from '/preferences.js';
+import {savedDataMessage} from '/saved-data.js';
 const $=id=>document.getElementById(id);let state={items:[]},draftSelection=null,onlyPinned=false,editing=null,memberEditing=null,revision=0,connectionError='',serviceError='';
 const labels={disconnected:'未连接',connecting:'正在连接',waiting:'等待 Debug',running:'● 目标运行中',halted:'● 目标已暂停',error:'连接异常 / 重试中'};
-async function api(path,data,{signal}={}){const context=data.sessionId??state.sessionId;revision++;for(let attempt=0;attempt<40;attempt++){signal?.throwIfAborted();const r=await fetch('/api/'+path,{method:'POST',signal,headers:{'Content-Type':'application/json','X-Keil-Client':'1'},body:JSON.stringify({...data,sessionId:context,...(['write','toggle'].includes(path)?{sessionKey:data.sessionKey??state.sessionKey}:{})})});const b=await r.json();signal?.throwIfAborted();if(r.status===409){await new Promise(r=>setTimeout(r,150));continue;}if(!r.ok)throw Error(b.error||'请求失败');revision++;state=b;if(['write','toggle','display','selection'].includes(path))render();return b;}throw Error('Keil 正忙，请稍后重试');}
+async function api(path,data,{signal}={}){const context=data.sessionId??state.sessionId;revision++;for(let attempt=0;attempt<40;attempt++){signal?.throwIfAborted();const r=await fetch('/api/'+path,{method:'POST',signal,headers:{'Content-Type':'application/json','X-Keil-Client':'1'},body:JSON.stringify({...data,sessionId:context,...(['write','toggle','data/save','data/restore'].includes(path)?{sessionKey:data.sessionKey??state.sessionKey}:{})})});const b=await r.json();signal?.throwIfAborted();if(r.status===409){await new Promise(r=>setTimeout(r,150));continue;}if(!r.ok)throw Error(b.error||'请求失败');revision++;state=b;if(['write','toggle','display','selection','data/save','data/restore'].includes(path))render();return b;}throw Error('Keil 正忙，请稍后重试');}
 function error(e){$('error').textContent=e.message;}
 function element(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;}
 function configs(){return state.items.map(({name,min,max,step,pinned,members,hex,visibleMembers})=>({name,min,max,step,pinned,...(members?{members}:{}),...(hex!==undefined?{hex}:{}),...(visibleMembers!==undefined?{visibleMembers}:{})}));}
 function groupType(v,rows){return v.children?`${v.type||''} · ${rows.length} / ${v.totalMembers} 项`:v.type||'等待采样';}
 const cardsByName=new Map();let renderedSession='';
+const dataPending=new Map(),dataErrors=new Map();
 const layoutController=createLayout({container:$('cards'),save:layout=>api('layout',{layout}),onError:error,onMode:editing=>{$('layoutEdit').textContent=editing?'完成排版':'编辑布局';$('layoutHint').hidden=!editing;}});
 $('layoutEdit').onclick=()=>layoutController.toggle();$('layoutReset').onclick=()=>layoutController.reset();
 const visibleRoots=new Set();let priorityTimer=null,lastPriority='';
 const visibility=new IntersectionObserver(entries=>{for(const entry of entries){if(entry.isIntersecting)visibleRoots.add(entry.target.dataset.root);else visibleRoots.delete(entry.target.dataset.root);}clearTimeout(priorityTimer);priorityTimer=setTimeout(()=>{const names=[...visibleRoots].filter(name=>cardsByName.has(name)).sort(),key=JSON.stringify(names);if(key!==lastPriority){lastPriority=key;void api('priority',{names}).catch(error);}},150);},{rootMargin:'250px'});
 function render(){
- if(renderedSession!==state.sessionId){for(const entry of cardsByName.values()){entry.controls.forEach(c=>c.dispose());visibility.unobserve(entry.card);entry.card.remove();}cardsByName.clear();visibleRoots.clear();lastPriority='';layoutController.replace(state.layout);renderedSession=state.sessionId;bulkPicker=null;for(const id of ['editor','membersDialog','selectionDialog'])if($(id).open)$(id).close();}
+ if(renderedSession!==state.sessionId){for(const entry of cardsByName.values()){entry.controls.forEach(c=>c.dispose());visibility.unobserve(entry.card);entry.card.remove();}cardsByName.clear();visibleRoots.clear();dataPending.clear();dataErrors.clear();lastPriority='';layoutController.replace(state.layout);renderedSession=state.sessionId;bulkPicker=null;for(const id of ['editor','membersDialog','selectionDialog'])if($(id).open)$(id).close();}
 
  $('status').textContent=serviceError?'工具服务不可用':labels[state.status]||state.status;$('error').textContent=serviceError||connectionError||connectionNotices(state).error;$('count').textContent=`${state.items.length} 个变量`;$('project').textContent=state.projectPath||'尚未选择工程 · 连接窗口自动识别，或点击更换来源';renderSessions();renderConnection();preferenceController.reconcile(state.preferences);
  const query=$('search').value.toLowerCase(),items=state.items.filter(v=>(!onlyPinned||v.pinned)&&v.name.toLowerCase().includes(query));
@@ -40,10 +42,14 @@ function render(){
    if(v.truncated)card.append(element('p','card-error','此组超过 512 项或展开深度限制；请单独选择子数组继续观测。'));
    if(v.missingMembers?.length)card.append(element('p','card-error','部分已选成员在当前工程中不可用，请重新选择显示成员。'));
    if(v.children&&!rows.length)card.append(element('p','group-empty','未选择显示成员'));
+   let dataControls=null;
+   if(v.children||v.savedData){const actions=element('div','data-actions'),save=element('button','','保存当前数据'),restore=element('button','','恢复已保存数据'),message=element('p','data-status');save.setAttribute('aria-label',v.name+' 保存当前数据');restore.setAttribute('aria-label',v.name+' 恢复已保存数据');save.title='重新读取当前显示的数值成员，保存到本地；不会写入 Keil';restore.title='检查全部保存成员后逐项写回并回读；仅在当前 Debug 中执行';message.setAttribute('role','status');message.setAttribute('aria-live','polite');save.onclick=()=>void groupDataAction(v.name,'save');restore.onclick=()=>void groupDataAction(v.name,'restore');actions.append(save,restore);card.append(actions,message);dataControls={save,restore,message};}
    const controlSession={sessionKey:state.sessionKey,sessionId:state.sessionId};const controls=rows.map(row=>createControl(row,{root:v.name,api:(path,data)=>api(path,{...data,...controlSession}),settings:current=>{memberEditing=v.children?{root:v.name,name:current.name}:null;void openEditor(current);}}));const body=element('div','widget-body');for(const control of controls)body.append(control.element);card.append(body);
-   entry={card,controls,signature};card.dataset.root=v.name;cardsByName.set(v.name,entry);cards.append(card);visibility.observe(card);
+   entry={card,controls,signature,dataControls};card.dataset.root=v.name;cardsByName.set(v.name,entry);cards.append(card);visibility.observe(card);
   }
-  entry.controls.forEach((control,i)=>control.update({...rows[i],editable:rows[i].editable&&!serviceError&&connectionSwitch.pending===null&&state.mode==='keil'&&['running','halted'].includes(state.status)}));
+  const connected=!serviceError&&connectionSwitch.pending===null&&state.mode==='keil'&&['running','halted'].includes(state.status),ownJob=state.dataJob?.status==='running'&&state.dataJob.root===v.name,preparing=dataPending.has(v.name);
+  entry.controls.forEach((control,i)=>{const name=rows[i].name,overlap=state.dataJob?.status==='running'&&[state.dataJob.root+'.',state.dataJob.root+'['].some(prefix=>name.startsWith(prefix));control.update({...rows[i],editable:rows[i].editable&&connected&&!ownJob&&!preparing&&!overlap});});
+  if(entry.dataControls){const {save,restore,message}=entry.dataControls,working=state.dataJob?.status==='running'||dataPending.size>0,ready=connected&&!!v.children?.length&&!working&&!entry.controls.some(c=>c.busy),notice=savedDataMessage(v,state.dataJob);save.disabled=!ready;restore.disabled=!ready||!v.savedData;message.textContent=dataErrors.get(v.name)||(preparing?'正在准备…':notice.text);message.classList.toggle('data-error',dataErrors.has(v.name)||notice.error);}
   entry.card.querySelector(':scope > .type').textContent=groupType(v,rows);
  }
  items.forEach((item,index)=>{const card=cardsByName.get(item.name).card;if(cards.children[index]!==card)cards.insertBefore(card,cards.children[index]||null);});
@@ -51,6 +57,11 @@ function render(){
  $('updated').textContent='界面更新 '+new Date().toLocaleTimeString();
 }
 async function updateItem(name,patch){try{await api('items',{items:configs().map(v=>v.name===name?{...v,...patch}:v)});render();}catch(e){error(e);}}
+async function groupDataAction(root,action){
+ const entry=cardsByName.get(root);if(entry?.controls.some(c=>c.busy)){dataErrors.set(root,'变量正在写入，请等待回读完成后再操作');render();return;}
+ const token={sessionId:state.sessionId,sessionKey:state.sessionKey};dataPending.set(root,token);dataErrors.delete(root);render();
+ try{await api('data/'+action,{root,...token});}catch(e){if(state.sessionId===token.sessionId)dataErrors.set(root,e.message);}finally{if(dataPending.get(root)===token)dataPending.delete(root);render();}
+}
 let variableOptions=[],selectionVersion=0,draftVisibleMembers,draftGroupName='',bulkPicker=null,bulkVersion=0;
 const chooseMembers=element('button','choose-members','批量选择显示成员');chooseMembers.type='button';chooseMembers.id='chooseMembers';chooseMembers.hidden=true;$('browseInput').after(chooseMembers);
 function updateMemberButton(){chooseMembers.textContent='批量选择显示成员（'+(draftVisibleMembers===undefined?'全部':draftVisibleMembers.length+' 项')+'）';}
