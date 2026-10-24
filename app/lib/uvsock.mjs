@@ -82,7 +82,10 @@ export class UVSock {
     if(!validName(name)||typeof value!=='number'||!Number.isFinite(value))throw Error('无效写入请求');
     const before=await this.read(name);if(!before.editable||before.aggregate||before.array||before.pointer)throw Error('变量不可写');if(/char|short|int|long|bool|enum/i.test(before.type)&&!Number.isInteger(value))throw Error('整数变量不能写入小数');
     let assignmentError;
-    try{if(this.legacy){const b=Buffer.alloc(272);sstr(`${name} = ${numericLiteral(value,before.type)}`).copy(b,12);await this.request(0x200a,b);}else{const b=Buffer.alloc(276);b.writeInt32LE(before.id);sstr(numericLiteral(value,before.type)).copy(b,16);await this.request(0x202f,b);}}
+    // Extended VARIABLE_SET can take over five seconds per member after applying
+    // the value. Numeric expression assignment avoids that slow path while keeping
+    // extended reads/member browsing. Send once, then confirm independently.
+    try{const b=Buffer.alloc(272);sstr(`${name} = ${numericLiteral(value,before.type)}`).copy(b,12);await this.request(0x200a,b);}
     catch(e){if(e.keilStatus!==13)throw e;assignmentError=e;}
     let actual,readError;
     for(let attempt=0;attempt<3;attempt++){try{actual=await this.read(name);break;}catch(e){readError=e;if(e.keilStatus!==13)break;if(attempt<2)await new Promise(resolve=>setTimeout(resolve,60));}}

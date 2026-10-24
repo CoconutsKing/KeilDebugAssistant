@@ -16,7 +16,7 @@ test('HTTP edits/deletion and sampling remain responsive during a slow window sc
    if(cmd===0x2004){value=Buffer.alloc(4);value.writeUInt32LE(1);}
    if(cmd===0x202b){value=Buffer.alloc(1060);value.writeInt32LE(17);value.writeUInt32LE(1,16);sstr('0x7').copy(value,20);sstr('int').copy(value,280);sstr('gain').copy(value,540);sstr('gain').copy(value,800);}
    if(cmd===0x202f)actualValue=Number(frame.subarray(52,52+frame.readUInt32LE(48)-1).toString());
-   if(cmd===0x200a){reads.push(frame.subarray(48,48+frame.readUInt32LE(44)-1).toString());if(readError)status=13;else{value=Buffer.alloc(12);value.writeUInt32LE(4);value.writeInt32LE(actualValue,4);}}
+   if(cmd===0x200a){const expression=frame.subarray(48,48+frame.readUInt32LE(44)-1).toString();if(expression.includes(' = '))actualValue=Number(expression.split(' = ')[1]);else reads.push(expression);if(readError)status=13;else{value=Buffer.alloc(12);value.writeUInt32LE(4);value.writeInt32LE(actualValue,4);}}
    const response=Buffer.alloc(8+value.length);response.writeUInt32LE(cmd);response.writeUInt32LE(status,4);value.copy(response,8);const reply=()=>socket.write(packet(0x3000,response));if(cmd===0x200a&&holdReads)heldReads.push(reply);else reply();
   }});
  };
