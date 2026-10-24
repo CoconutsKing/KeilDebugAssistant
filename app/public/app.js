@@ -7,6 +7,7 @@ import {createMemberSelection} from '/member-picker.js';
 import {connectionNotices} from '/notices.js';
 import {createPreferenceController} from '/preferences.js';
 import {savedDataMessage} from '/saved-data.js';
+import {createUpdates} from '/updates.js';
 const $=id=>document.getElementById(id);let state={items:[]},draftSelection=null,onlyPinned=false,editing=null,memberEditing=null,revision=0,connectionError='',serviceError='';
 const labels={disconnected:'未连接',connecting:'正在连接',waiting:'等待 Debug',running:'● 目标运行中',halted:'● 目标已暂停',error:'连接异常 / 重试中'};
 async function api(path,data,{signal}={}){const context=data.sessionId??state.sessionId;revision++;for(let attempt=0;attempt<40;attempt++){signal?.throwIfAborted();const r=await fetch('/api/'+path,{method:'POST',signal,headers:{'Content-Type':'application/json','X-Keil-Client':'1'},body:JSON.stringify({...data,sessionId:context,...(['write','toggle','data/save','data/restore'].includes(path)?{sessionKey:data.sessionKey??state.sessionKey}:{})})});const b=await r.json();signal?.throwIfAborted();if(r.status===409){await new Promise(r=>setTimeout(r,150));continue;}if(!r.ok)throw Error(b.error||'请求失败');revision++;state=b;if(['write','toggle','display','selection','data/save','data/restore'].includes(path))render();return b;}throw Error('Keil 正忙，请稍后重试');}
@@ -16,11 +17,13 @@ function configs(){return state.items.map(({name,min,max,step,pinned,members,hex
 function groupType(v,rows){return v.children?`${v.type||''} · ${rows.length} / ${v.totalMembers} 项`:v.type||'等待采样';}
 const cardsByName=new Map();let renderedSession='';
 const dataPending=new Map(),dataErrors=new Map();
+const updates=createUpdates({document,api,render});let loadedVersion='';
 const layoutController=createLayout({container:$('cards'),save:layout=>api('layout',{layout}),onError:error,onMode:editing=>{$('layoutEdit').textContent=editing?'完成排版':'编辑布局';$('layoutHint').hidden=!editing;}});
 $('layoutEdit').onclick=()=>layoutController.toggle();$('layoutReset').onclick=()=>layoutController.reset();
 const visibleRoots=new Set();let priorityTimer=null,lastPriority='';
 const visibility=new IntersectionObserver(entries=>{for(const entry of entries){if(entry.isIntersecting)visibleRoots.add(entry.target.dataset.root);else visibleRoots.delete(entry.target.dataset.root);}clearTimeout(priorityTimer);priorityTimer=setTimeout(()=>{const names=[...visibleRoots].filter(name=>cardsByName.has(name)).sort(),key=JSON.stringify(names);if(key!==lastPriority){lastPriority=key;void api('priority',{names}).catch(error);}},150);},{rootMargin:'250px'});
 function render(){
+ updates.update(state.update);if(state.version)for(const label of document.querySelectorAll('[data-version]'))label.textContent='V'+state.version;
  if(renderedSession!==state.sessionId){for(const entry of cardsByName.values()){entry.controls.forEach(c=>c.dispose());visibility.unobserve(entry.card);entry.card.remove();}cardsByName.clear();visibleRoots.clear();dataPending.clear();dataErrors.clear();lastPriority='';layoutController.replace(state.layout);renderedSession=state.sessionId;bulkPicker=null;for(const id of ['editor','membersDialog','selectionDialog'])if($(id).open)$(id).close();}
 
  $('status').textContent=serviceError?'工具服务不可用':labels[state.status]||state.status;$('error').textContent=serviceError||connectionError||connectionNotices(state).error;$('count').textContent=`${state.items.length} 个变量`;$('project').textContent=state.projectPath||'尚未选择工程 · 连接窗口自动识别，或点击更换来源';renderSessions();renderConnection();preferenceController.reconcile(state.preferences);
@@ -167,4 +170,4 @@ function setPreference(patch){preferenceController.set(patch);}
 for(const button of document.querySelectorAll('.theme-swatch'))button.onclick=()=>setPreference({theme:button.dataset.theme});$('sidebarToggle').onclick=()=>setPreference({collapsed:!preferenceController.current.collapsed});
 $('guideDone').onclick=()=>void setPreference({guideOpen:false});$('guideClose').onclick=event=>{event.preventDefault();event.stopPropagation();setPreference({guideOpen:false,guideDismissed:true});};$('help').onclick=()=>{setPreference({guideOpen:true,guideDismissed:false});$('guide').scrollIntoView({behavior:'smooth',block:'start'});};
 $('guide').ontoggle=()=>{if($('guide').open!==preferenceController.current.guideOpen)setPreference({guideOpen:$('guide').open});};
-async function tick(){try{const version=revision;const r=await fetch('/api/state');if(!r.ok)throw Error('服务不可用');const result=await r.json();serviceError='';if(version===revision){state=result;render();}}catch(e){serviceError='无法连接本地工具服务：'+e.message;render();}setTimeout(tick,500);}tick();
+async function tick(){try{const version=revision;const editing=!!document.querySelector('dialog[open]:not(#updateDialog),.layout-editing');const r=await fetch('/api/state',{headers:{'X-Keil-UI-Editing':editing?'1':'0'}});if(!r.ok)throw Error('服务不可用');const result=await r.json();if(loadedVersion&&result.version!==loadedVersion){location.reload();return;}loadedVersion=result.version;serviceError='';if(version===revision){state=result;render();}}catch(e){serviceError=state.update?.phase==='installing'?'':'无法连接本地工具服务：'+e.message;render();}setTimeout(tick,500);}tick();

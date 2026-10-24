@@ -2,7 +2,9 @@ import http from 'node:http';
 import {readFile,writeFile,rename,unlink,mkdir} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {SessionPool,chooseSession} from './lib/sessions.mjs';
-import {pathToFileURL} from 'node:url';
+import {pathToFileURL,fileURLToPath} from 'node:url';
+import {version} from './lib/version.mjs';
+import {Updater,startInstaller} from './lib/updater.mjs';
 import {resolve} from 'node:path';
 import {preferences as validatePreferences} from './lib/preferences.mjs';
 import {loadCatalog} from './lib/catalog.mjs';
@@ -17,9 +19,9 @@ const root=new URL('./',import.meta.url),home=new URL('../',root),userRoot=proce
 await mkdir(userRoot,{recursive:true});await mkdir(dataRoot,{recursive:true});
 const pool=new SessionPool();let selection='auto',sessionInfo=null,sessionKey='',sessionId='',profiles={},prefs=validatePreferences({});
 let items=[],mode='disconnected',client=null,status='disconnected',lastError='',interval=500,projectPath='',lastXml='',values=new Map(),busy=false;
-let shuttingDown=false,connectionEpoch=0;const runtime=new URL('runtime.json',dataRoot),shutdownToken=randomUUID();
+let shuttingDown=false,updating=false,connectionEpoch=0;const runtime=new URL('runtime.json',dataRoot),shutdownToken=randomUUID();
 let catalog=null,catalogError='',catalogChecked=0;
-let interactionRequested=false;
+let interactionRequested=false,lastUIBusyAt=0;
 let defaults={min:0,max:100,step:1,pinned:true},excluded=new Set(),groupPlans=new Map(),sampleCursor=0;
 let activeRoots=[],sampleRound=0;
 let layout={mode:'grid',widgets:{}};
@@ -114,7 +116,7 @@ async function activateSession(info,epoch=connectionEpoch){if(epoch!==connection
 async function syncProject(){if(!projectPath)return;const xml=await readFile(projectPath,'utf8');if(xml===lastXml)return;lastXml=xml;for(const name of watchNames(xml))if(!excluded.has(name)&&!items.some(v=>v.name===name))items.push(validateItem({name}));await save();}
 async function sample(name,epoch){try{const value=await readLive(name);if(epoch===connectionEpoch)values.set(name,{...value,updated:Date.now()});}catch(e){if(epoch!==connectionEpoch)return;values.set(name,{...values.get(name),error:e.message,editable:false});if(client?.socket?.destroyed){client=null;throw e;}}}
 async function samplePanel(epoch){const active=items.filter(item=>activeRoots.includes(item.name));const selected=active.length&&++sampleRound%10!==0?active:items;const names=[...new Set(selected.flatMap(item=>planFor(item.name).group?rowsFor(item).map(v=>v.name):[item.name]))];for(let i=0;i<Math.min(8,names.length);i++){if(epoch!==connectionEpoch||mode!=='keil')break;sampleCursor%=names.length;await sample(names[sampleCursor++],epoch);if(interactionRequested)break;}}
-async function poll(){if(shuttingDown)return;if(busy){setTimeout(poll,interval);return;}busy=true;const epoch=connectionEpoch;try{
+async function poll(){if(shuttingDown)return;if(busy||updating){setTimeout(poll,interval);return;}busy=true;const epoch=connectionEpoch;try{
   pool.applyDiscovered(null);
   if(mode==='keil'){
     const sessions=await pool.refresh(keilPort);if(epoch!==connectionEpoch)return;if(selection==='auto'&&!pool.hasDiscovered){status='connecting';lastError='';return;}const selected=chooseSession(sessions,sessionInfo?.port,selection);
@@ -125,7 +127,7 @@ async function poll(){if(shuttingDown)return;if(busy){setTimeout(poll,interval);
   }
 }catch(e){if(epoch===connectionEpoch){lastError=e.message;status='error';}}finally{busy=false;setTimeout(poll,interval);}}
 let keilPort=4823;
-function snapshot(){return {version:'2.0.9',preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,dataJob:jobInfo(),compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name),rows=rowsFor(v);return {...v,...values.get(v.name),...(plan.group?{...(catalog?.describe(v.name)||{}),value:'',editable:false,children:rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),totalMembers:plan.rows.length,missingMembers:v.visibleMembers?.filter(name=>!rows.some(row=>row.name===name))||[],truncated:plan.truncated}:{}),name:v.name,history:historyFor(v.name),savedData:savedInfo(v.name)};})};}
+function snapshot(){return {version,update:updater.snapshot(),preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,dataJob:jobInfo(),compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name),rows=rowsFor(v);return {...v,...values.get(v.name),...(plan.group?{...(catalog?.describe(v.name)||{}),value:'',editable:false,children:rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),totalMembers:plan.rows.length,missingMembers:v.visibleMembers?.filter(name=>!rows.some(row=>row.name===name))||[],truncated:plan.truncated}:{}),name:v.name,history:historyFor(v.name),savedData:savedInfo(v.name)};})};}
 async function body(req){let data='';for await(const chunk of req){data+=chunk;if(data.length>1024*1024)throw Error('请求过大');}return JSON.parse(data||'{}');}
 const server=http.createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');
@@ -134,7 +136,7 @@ const server=http.createServer(async(req,res)=>{
     const host=req.headers.host;const expected=`127.0.0.1:${server.address().port}`;
     if(host!==expected||req.headers.origin&&req.headers.origin!==`http://${expected}`||req.headers['sec-fetch-site']==='cross-site'){res.writeHead(403);res.end();return;}
     const path=new URL(req.url,`http://${expected}`).pathname;
-    if(req.method==='GET'&&path==='/api/state'){res.setHeader('Content-Type','application/json');return res.end(JSON.stringify(snapshot()));}
+    if(req.method==='GET'&&path==='/api/state'){if(req.headers['x-keil-ui-editing']==='1')lastUIBusyAt=Date.now();res.setHeader('Content-Type','application/json');return res.end(JSON.stringify(snapshot()));}
     if(req.method==='POST'&&path.startsWith('/api/')){
       if(req.headers['x-keil-client']!=='1')throw Error('缺少客户端标识');
       const b=await body(req);
@@ -142,6 +144,11 @@ const server=http.createServer(async(req,res)=>{
         if(b.token!==shutdownToken)throw Error('关闭凭证无效');
         res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true}));void shutdown();return;
       }
+      // GitHub checks/downloads never own the Keil request lock.
+      if(path==='/api/update/check'){void updater.check();res.setHeader('Content-Type','application/json');return res.end(JSON.stringify(snapshot()));}
+      if(path==='/api/update/install'){updater.requestInstall();res.setHeader('Content-Type','application/json');return res.end(JSON.stringify(snapshot()));}
+      if(path==='/api/update/settings'){await updater.setAutomatic(b.automatic);res.setHeader('Content-Type','application/json');return res.end(JSON.stringify(snapshot()));}
+      if(updating){res.writeHead(503);return res.end(JSON.stringify({error:'正在安装更新并重启，请稍候'}));}
       // Interface preferences do not use Keil and must never wait for target I/O.
       if(path==='/api/preferences'){
         prefs=validatePreferences({...prefs,...b.preferences});await save();
@@ -248,11 +255,18 @@ const server=http.createServer(async(req,res)=>{
         if(!['/api/priority','/api/sessions','/api/data/save','/api/data/restore'].includes(path))await save();res.setHeader('Content-Type','application/json');res.end(JSON.stringify(snapshot()));
       }finally{busy=false;}return;
     }
-    const files={'/':'index.html','/app.js':'app.js','/controls.js':'controls.js','/format.js':'format.js','/saved-data.js':'saved-data.js','/layout.js':'layout.js','/editor.js':'editor.js','/search.js':'search.js','/style.css':'style.css','/keil.ico':'keil.ico','/preferences.js':'preferences.js','/session-picker.js':'session-picker.js','/member-picker.js':'member-picker.js','/notices.js':'notices.js'};if(req.method!=='GET'||!files[path]){res.writeHead(404);return res.end();}
+    const files={'/':'index.html','/app.js':'app.js','/controls.js':'controls.js','/format.js':'format.js','/saved-data.js':'saved-data.js','/updates.js':'updates.js','/layout.js':'layout.js','/editor.js':'editor.js','/search.js':'search.js','/style.css':'style.css','/keil.ico':'keil.ico','/preferences.js':'preferences.js','/session-picker.js':'session-picker.js','/member-picker.js':'member-picker.js','/notices.js':'notices.js'};if(req.method!=='GET'||!files[path]){res.writeHead(404);return res.end();}
     res.setHeader('Content-Type',path.endsWith('.ico')?'image/x-icon':path.endsWith('.js')?'text/javascript':path.endsWith('.css')?'text/css':'text/html; charset=utf-8');res.end(await readFile(new URL('public/'+files[path],root)));
   }catch(e){if(e.variableName&&e.actual)values.set(e.variableName,{...e.actual,updated:Date.now()});res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:e.message}));}
 });
-async function shutdown(){if(shuttingDown)return;cancelDataJob('工具已关闭');shuttingDown=true;pool.close();server.close();try{const saved=JSON.parse(await readFile(runtime,'utf8'));if(saved.token===shutdownToken)await unlink(runtime);}catch{}console.log('Keil Debug Assistant stopped.');}
+async function shutdown(){if(shuttingDown)return;cancelDataJob('工具已关闭');shuttingDown=true;updater.close();pool.close();server.close();try{const saved=JSON.parse(await readFile(runtime,'utf8'));if(saved.token===shutdownToken)await unlink(runtime);}catch{}console.log('Keil Debug Assistant stopped.');}
 process.on('SIGINT',()=>void shutdown());process.on('SIGTERM',()=>void shutdown());
+const updater=new Updater({version,userDir:fileURLToPath(userRoot),dataDir:fileURLToPath(dataRoot),blockedReason:()=>mode!=='disconnected'?'手动断开 Keil 后安装，调试继续运行。':Date.now()-lastUIBusyAt<2000?'完成面板编辑后安装。':'当前操作完成后安装。',canInstall:()=>Date.now()-lastUIBusyAt>=2000&&mode==='disconnected'&&!busy&&!updating&&!shuttingDown&&dataJob?.status!=='running',install:async(staged,info)=>{
+ if(Date.now()-lastUIBusyAt<2000||mode!=='disconnected'||busy||shuttingDown||updating||dataJob?.status==='running')return false;
+ updating=true;busy=true;let installer;
+ try{await save();installer=await startInstaller({root:fileURLToPath(home),jobDir:staged.jobDir,userDir:fileURLToPath(userRoot),dataDir:fileURLToPath(dataRoot),pid:process.pid,port:server.address().port,version:info.version,previous:version});await installer.apply();setTimeout(()=>void shutdown(),800);return true;}
+ catch(e){installer?.cancel();updating=false;busy=false;throw e;}
+}});
+await updater.init();
 export {server};
-server.listen(Number(process.env.PORT||3210),'127.0.0.1',async()=>{await writeFile(runtime,JSON.stringify({port:server.address().port,token:shutdownToken,pid:process.pid}));console.log(`Keil Debug Assistant: http://127.0.0.1:${server.address().port}`);void pool.scan();poll();});
+server.listen(Number(process.env.PORT||3210),'127.0.0.1',async()=>{await writeFile(runtime,JSON.stringify({port:server.address().port,token:shutdownToken,pid:process.pid}));console.log(`Keil Debug Assistant: http://127.0.0.1:${server.address().port}`);void pool.scan();poll();if(process.env.KDA_UPDATE_DISABLED!=='1')updater.start();});
