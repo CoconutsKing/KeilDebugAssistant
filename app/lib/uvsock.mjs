@@ -7,6 +7,7 @@ export function packet(cmd, data=Buffer.alloc(0)) {
 }
 export function sstr(s) { const raw=Buffer.from(s+'\0'); if(raw.length>256) throw Error('表达式过长'); const b=Buffer.alloc(260); b.writeUInt32LE(raw.length); raw.copy(b,4); return b; }
 function stringAt(b,off) { if(b.length<off+4) throw Error(`Keil 字符串头不完整（${b.length} 字节，偏移 ${off}）`); const n=b.readUInt32LE(off); if(n>256||off+4+n>b.length) throw Error(`Keil 字符串长度无效（${b.length} 字节，偏移 ${off}，长度 ${n}）`);if(n&&b[off+3+n]!==0)throw Error('Keil 字符串缺少结束符');return b.subarray(off+4,off+4+Math.max(0,n-1)).toString(); }
+function responseError(frame){const status=frame.readUInt32LE(36),detail=frame.subarray(52).toString().replace(/\0.*$/s,'');const error=Error(`Keil 状态 ${status}: ${detail||'操作被拒绝'}`);error.keilStatus=status;return error;}
 export function parseVariable(b) {
  if(b.length<20)throw Error(`Keil VARINFO 头不完整（收到 ${b.length} 字节）`);
  const flags=b.readUInt32LE(16);
@@ -39,6 +40,7 @@ export class UVSock {
       if(frame.readUInt32LE(8)!==n-32)throw Error('UVSOCK 长度不匹配');
       if(n<40)continue;
       const outer=frame.readUInt32LE(4),operation=frame.readUInt32LE(32);
+      if(outer===0x4000&&this.lifecycle?.cmd===operation){const wait=this.lifecycle;this.lifecycle=null;clearTimeout(wait.timer);frame.readUInt32LE(36)?wait.reject(responseError(frame)):wait.resolve();continue;}
       if(outer===0x4000&&this.enumeration&&[0x5040,0x5041,0x5042].includes(operation)){
         const enumeration=this.enumeration;
         if(frame.readUInt32LE(36)){enumeration.reject(Error('Keil 成员枚举失败'));this.enumeration=null;continue;}
@@ -49,11 +51,32 @@ export class UVSock {
       if(outer!==0x3000)continue;
       const p=this.pending;if(!p||frame.readUInt32LE(32)!==p.cmd)continue;
       clearTimeout(p.timer);this.pending=null;
-      const status=frame.readUInt32LE(36);if(status){const detail=frame.subarray(52).toString().replace(/\0.*$/s,'');const e=Error(`Keil 状态 ${status}: ${detail||'操作被拒绝'}`);e.keilStatus=status;p.reject(e);}else p.resolve(frame.subarray(40));
+      const status=frame.readUInt32LE(36);if(status)p.reject(responseError(frame));else p.resolve(frame.subarray(40));
     }
   }
-  request(cmd,data){if(this.pending)throw Error('调试请求必须串行');if(!this.socket||this.socket.destroyed)throw Error('尚未连接 Keil');return new Promise((resolve,reject)=>{const timer=setTimeout(()=>this.close(Error('Keil 请求超时，连接已断开以避免迟到响应错配')),5000);this.pending={cmd,resolve,reject,timer};this.socket.write(packet(cmd,data));});}
-  async status(){const b=await this.request(0x2004);if(b.length<4)throw Error('状态响应不完整');return b.readUInt32LE(0)?'running':'halted';}
+  request(cmd,data,{timeout=5000}={}){if(this.pending)throw Error('调试请求必须串行');if(!this.socket||this.socket.destroyed)throw Error('尚未连接 Keil');return new Promise((resolve,reject)=>{const timer=setTimeout(()=>this.close(Error('Keil 请求超时，连接已断开以避免迟到响应错配')),timeout);this.pending={cmd,resolve,reject,timer};this.socket.write(packet(cmd,data));});}
+  async status(options){const b=await this.request(0x2004,undefined,options);if(b.length<4)throw Error('状态响应不完整');return b.readUInt32LE(0)?'running':'halted';}
+  async debugCommand(cmd,{timeout=60000,signal}={}){
+    if(this.lifecycle)throw Error('另一个调试控制请求尚未完成');signal?.throwIfAborted();let wait;
+    const completion=new Promise((resolve,reject)=>{wait={cmd,resolve,reject,timer:setTimeout(()=>this.close(Error((cmd===0x2000?'进入 Debug':'Run')+' 等待完成超时，请检查 ST-Link、开发板供电及 Keil 弹窗')),timeout)};this.lifecycle=wait;});
+    const abort=()=>this.close(signal.reason||Error('调试控制已取消'));signal?.addEventListener('abort',abort,{once:true});
+    try{await Promise.all([this.request(cmd,undefined,{timeout:Math.min(timeout,10000)}),completion]);}
+    finally{clearTimeout(wait.timer);if(this.lifecycle===wait)this.lifecycle=null;signal?.removeEventListener('abort',abort);}
+  }
+  async enterAndRun({signal,onPhase=()=>{},assertCurrent=()=>{},timeout=60000}={}){
+    const check=()=>{signal?.throwIfAborted();assertCurrent();};let state;check();onPhase('checking');
+    try{state=await this.status({timeout:10000});}catch(e){if(e.keilStatus!==6)throw e;state='waiting';}check();
+    if(state==='waiting'){
+      if(this.legacy)await this.enableExtended();check();onPhase('entering');
+      try{await this.debugCommand(0x2000,{signal,timeout});}catch(e){if(![10,11].includes(e.keilStatus))throw e;}
+      check();state=await this.status({timeout:10000});check();
+    }
+    if(state!=='running'){
+      onPhase('running');check();try{await this.debugCommand(0x2002,{signal,timeout});}catch(e){if(e.keilStatus!==11)throw e;}
+      check();state=await this.status({timeout:10000});check();
+    }
+    return state;
+  }
   async read(name){
     if(!validName(name))throw Error('无效变量路径');
     const b=Buffer.alloc(272);sstr(name).copy(b,12);
@@ -93,6 +116,6 @@ export class UVSock {
     if(assignmentError&&!matchesTarget(actual.value,value,actual.type)){const error=Error(`变量 ${name} 写入未确认：${assignmentError.message}；实际回读 ${actual.value}，请求 ${value}`);error.variableName=name;error.actual=actual;throw error;}
     return {...actual,beforeValue:before.value,...(assignmentError?{writeDiagnostic:'Keil 返回状态 13，但独立回读已确认目标值'}:{}),...(!matchesTarget(actual.value,value,actual.type)?{writeNotice:`请求 ${value}，实际回读 ${actual.value}`}:{})};
   }
-  close(error=Error('连接已断开')){const p=this.pending;this.pending=null;if(p){clearTimeout(p.timer);p.reject(error);}this.enumeration?.reject(error);this.enumeration=null;this.socket?.destroy();}
+  close(error=Error('连接已断开')){const p=this.pending;this.pending=null;if(p){clearTimeout(p.timer);p.reject(error);}const wait=this.lifecycle;this.lifecycle=null;if(wait){clearTimeout(wait.timer);wait.reject(error);}this.enumeration?.reject(error);this.enumeration=null;this.socket?.destroy();}
 }
 

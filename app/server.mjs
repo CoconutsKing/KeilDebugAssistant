@@ -14,6 +14,7 @@ import {validHistory,recordInput,toggleTarget} from './lib/history.mjs';
 import {isIntegerVariable} from './public/format.js';
 import {dataRows,restorableValue,validateSavedRecord,savedRecords,restoreRows,sameTargetType} from './lib/saved-data.mjs';
 import {matchesTarget} from './lib/uvsock.mjs';
+import {arrayAxes,reindexItem} from './lib/array-index.mjs';
 import {validateItem,validateWrite,watchNames,validName,memberPath} from './lib/model.mjs';
 const root=new URL('./',import.meta.url),home=new URL('../',root),userRoot=process.env.KDA_USER_DIR?pathToFileURL(resolve(process.env.KDA_USER_DIR)+'/'):new URL('userdata/',home),dataRoot=process.env.KDA_DATA_DIR?pathToFileURL(resolve(process.env.KDA_DATA_DIR)+'/'):new URL('data/',home),config=new URL('panel.json',userRoot);
 await mkdir(userRoot,{recursive:true});await mkdir(dataRoot,{recursive:true});
@@ -26,7 +27,7 @@ let defaults={min:0,max:100,step:1,pinned:true},excluded=new Set(),groupPlans=ne
 let activeRoots=[],sampleRound=0;
 let layout={mode:'grid',widgets:{}};
 let writeHistory={};
-let savedData=savedRecords(),dataJob=null;
+let savedData=savedRecords(),dataJob=null,debugJob=null;
 function historyScope(){return projectPath||'keil';}
 function historyFor(name){const history=writeHistory[historyScope()]?.[name];return validHistory(history)?history:null;}
 function rememberHistory(name,history){if(!validHistory(history))return;const scope=historyScope();if(!Object.hasOwn(writeHistory,scope))writeHistory[scope]={};Object.defineProperty(writeHistory[scope],name,{value:history,writable:true,enumerable:true,configurable:true});}
@@ -112,11 +113,34 @@ async function runDataJob(job){
   if(wrote&&job.sessionKey===sessionKey){try{await save();}catch{job.error+='；输入历史保存失败';}}
  }finally{busy=false;if(job===dataJob&&job.status==='running')setTimeout(()=>void runDataJob(job),50);}
 }
+function debugInfo(){if(!debugJob)return null;const {id,port,project,status,phase,error,started,finished}=debugJob;return {id,port,project,status,phase,error,started,finished};}
+function cancelDebugJob(message){if(debugJob?.status==='running'){const job=debugJob;job.status='cancelled';job.error=message;job.finished=Date.now();const error=Error(message);job.controller.abort(error);job.client?.close(error);}}
+function assertDebugJob(job){if(job!==debugJob||job.status!=='running'||job.epoch!==connectionEpoch||mode!=='keil'||shuttingDown)throw Error('连接或所选窗口已改变，已停止后续调试指令');}
+function startDebugJob(request){
+ if(request.sessionId!==sessionId||request.sessionKey!==sessionKey)throw Error('调试窗口已切换，请刷新后重试');
+ if(debugJob?.status==='running')return;
+ if(dataJob?.status==='running')throw Error('正在保存或恢复参数，请等待完成');
+ if(!Number.isInteger(request.port)||request.port<1||request.port>65535)throw Error('端口无效');
+ pool.applyDiscovered(request.port);const selectionMode=request.selection==='auto'?'auto':String(request.port),info=chooseSession(pool.sessions,sessionInfo?.port,selectionMode);if(!info?.port)throw Error('请选择可连接的 Keil 窗口');
+ mode='keil';selection=selectionMode;status='connecting';lastError='';values.clear();const epoch=++connectionEpoch;
+ const job={id:randomUUID(),port:info.port,pid:info.pid,project:info.project||'',status:'running',phase:'queued',error:'',started:Date.now(),epoch,controller:new AbortController()};debugJob=job;void pool.scan();setTimeout(()=>void runDebugJob(job),0);
+}
+async function runDebugJob(job){
+ if(job!==debugJob||job.status!=='running')return;if(busy){setTimeout(()=>void runDebugJob(job),25);return;}busy=true;
+ try{
+  assertDebugJob(job);pool.applyDiscovered(job.port);const info=pool.sessions.find(info=>info.port===job.port);if(!info||job.pid&&info.pid&&job.pid!==info.pid)throw Error('所选端口的 Keil 窗口已改变，请重新选择');
+  job.phase='connecting';let target=pool.clients.get(job.port);if(!target||target.socket?.destroyed){target?.close();target=pool.create();pool.clients.set(job.port,target);job.client=target;await target.connect(job.port);}else job.client=target;
+  assertDebugJob(job);await activateSession(info,job.epoch);assertDebugJob(job);job.project=info.project||'';
+  const actual=await target.enterAndRun({signal:job.controller.signal,assertCurrent:()=>assertDebugJob(job),onPhase:phase=>{assertDebugJob(job);job.phase=phase;}});assertDebugJob(job);
+  info.status=actual;info.error='';status=actual;lastError='';catalogChecked=0;job.status='done';job.phase=actual;job.finished=Date.now();
+ }catch(e){if(job.status==='running'){job.status='error';job.error=e.message;job.finished=Date.now();status='error';lastError=e.message;if(job.client?.socket?.destroyed)client=null;}}
+ finally{busy=false;}
+}
 async function activateSession(info,epoch=connectionEpoch){if(epoch!==connectionEpoch||mode!=='keil')return;if(!sessionInfo||sessionInfo.port!==info.port||sessionInfo.pid!==info.pid||sessionInfo.project!==info.project){cancelDataJob('调试窗口已切换');sessionId=randomUUID();values.clear();}const next=info.project?info.project.toLowerCase():'port:'+info.port;if(next!==sessionKey){if(sessionKey)profiles[sessionKey]=panelData();const same=projectPath&&info.project&&projectPath.replace(/\.uvoptx$/i,'.uvprojx').toLowerCase()===info.project.toLowerCase();if(profiles[next])applyPanel(profiles[next]);else if(!same)applyPanel();sessionKey=next;projectPath=info.project?info.project.replace(/\.uvprojx?$/i,'.uvoptx'):projectPath;await save();}if(epoch!==connectionEpoch||mode!=='keil')return;sessionInfo=info;client=pool.clients.get(info.port);keilPort=info.port;}
 async function syncProject(){if(!projectPath)return;const xml=await readFile(projectPath,'utf8');if(xml===lastXml)return;lastXml=xml;for(const name of watchNames(xml))if(!excluded.has(name)&&!items.some(v=>v.name===name))items.push(validateItem({name}));await save();}
 async function sample(name,epoch){try{const value=await readLive(name);if(epoch===connectionEpoch)values.set(name,{...value,updated:Date.now()});}catch(e){if(epoch!==connectionEpoch)return;values.set(name,{...values.get(name),error:e.message,editable:false});if(client?.socket?.destroyed){client=null;throw e;}}}
 async function samplePanel(epoch){const active=items.filter(item=>activeRoots.includes(item.name));const selected=active.length&&++sampleRound%10!==0?active:items;const names=[...new Set(selected.flatMap(item=>planFor(item.name).group?rowsFor(item).map(v=>v.name):[item.name]))];for(let i=0;i<Math.min(8,names.length);i++){if(epoch!==connectionEpoch||mode!=='keil')break;sampleCursor%=names.length;await sample(names[sampleCursor++],epoch);if(interactionRequested)break;}}
-async function poll(){if(shuttingDown)return;if(busy||updating){setTimeout(poll,interval);return;}busy=true;const epoch=connectionEpoch;try{
+async function poll(){if(shuttingDown)return;if(busy||updating||debugJob?.status==='running'){setTimeout(poll,interval);return;}busy=true;const epoch=connectionEpoch;try{
   pool.applyDiscovered(null);
   if(mode==='keil'){
     const sessions=await pool.refresh(keilPort);if(epoch!==connectionEpoch)return;if(selection==='auto'&&!pool.hasDiscovered){status='connecting';lastError='';return;}const selected=chooseSession(sessions,sessionInfo?.port,selection);
@@ -127,7 +151,7 @@ async function poll(){if(shuttingDown)return;if(busy||updating){setTimeout(poll,
   }
 }catch(e){if(epoch===connectionEpoch){lastError=e.message;status='error';}}finally{busy=false;setTimeout(poll,interval);}}
 let keilPort=4823;
-function snapshot(){return {version,update:updater.snapshot(),preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,dataJob:jobInfo(),compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name),rows=rowsFor(v);return {...v,...values.get(v.name),...(plan.group?{...(catalog?.describe(v.name)||{}),value:'',editable:false,children:rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),totalMembers:plan.rows.length,missingMembers:v.visibleMembers?.filter(name=>!rows.some(row=>row.name===name))||[],truncated:plan.truncated}:{}),name:v.name,history:historyFor(v.name),savedData:savedInfo(v.name)};})};}
+function snapshot(){return {version,update:updater.snapshot(),preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,dataJob:jobInfo(),debugJob:debugInfo(),compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name),rows=rowsFor(v);return {...v,...values.get(v.name),...(plan.group?{...(catalog?.describe(v.name)||{}),value:'',editable:false,children:rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),totalMembers:plan.rows.length,missingMembers:v.visibleMembers?.filter(name=>!rows.some(row=>row.name===name))||[],truncated:plan.truncated}:{}),name:v.name,indices:arrayAxes(v.name,path=>catalog?.describe(path)),history:historyFor(v.name),savedData:savedInfo(v.name)};})};}
 async function body(req){let data='';for await(const chunk of req){data+=chunk;if(data.length>1024*1024)throw Error('请求过大');}return JSON.parse(data||'{}');}
 const server=http.createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');
@@ -154,6 +178,8 @@ const server=http.createServer(async(req,res)=>{
         prefs=validatePreferences({...prefs,...b.preferences});await save();
         res.setHeader('Content-Type','application/json');res.end(JSON.stringify(snapshot()));return;
       }
+      if(path==='/api/debug/run'){startDebugJob(b);res.setHeader('Content-Type','application/json');return res.end(JSON.stringify(snapshot()));}
+      if(path==='/api/connect'&&debugJob?.status==='running'){cancelDebugJob('连接设置已改变');connectionEpoch++;}
       if(path==='/api/connect'&&b.mode==='disconnected'){
         cancelDataJob('连接已断开');connectionEpoch++;mode='disconnected';status='disconnected';lastError='';sessionId=randomUUID();
         pool.close();client=null;sessionInfo=null;values.clear();await save();
@@ -161,7 +187,7 @@ const server=http.createServer(async(req,res)=>{
       }
       if(busy){interactionRequested=true;res.writeHead(409);return res.end(JSON.stringify({error:'正在采样，请稍后重试'}));}busy=true;interactionRequested=false;
       try{
-        if(['/api/items','/api/layout','/api/priority','/api/project','/api/write','/api/toggle','/api/display','/api/selection','/api/group-members','/api/data/save','/api/data/restore'].includes(path)&&b.sessionId!==sessionId)throw Error('调试会话已切换，请等待界面刷新后重试');
+        if(['/api/index','/api/items','/api/layout','/api/priority','/api/project','/api/write','/api/toggle','/api/display','/api/selection','/api/group-members','/api/data/save','/api/data/restore'].includes(path)&&b.sessionId!==sessionId)throw Error('调试会话已切换，请等待界面刷新后重试');
         if(path==='/api/connect'){
           if(b.mode!=='keil')throw Error('仅支持连接 Keil 或断开连接');
           if(b.mode==='keil'&&(!Number.isInteger(b.port)||b.port<1||b.port>65535))throw Error('端口无效');
@@ -177,6 +203,16 @@ const server=http.createServer(async(req,res)=>{
         }else if(path==='/api/data/save'||path==='/api/data/restore'){
           if(b.sessionKey!==sessionKey)throw Error('调试工程已切换，请刷新后重试');
           await startDataJob(path.endsWith('/save')?'save':'restore',b.root);
+        }else if(path==='/api/index'){
+          if(b.sessionKey!==sessionKey)throw Error('调试工程已切换，请刷新后重试');
+          const item=items.find(item=>item.name===b.root);if(!item)throw Error('变量已被移除');if(dataJob?.status==='running'&&dataJob.root===b.root)throw Error('此组件正在保存或恢复数据，请等待完成');
+          await refreshCatalog(true);const next=reindexItem(item,b.dimension,b.index,path=>catalog?.describe(path));
+          if(items.some(other=>other!==item&&other.name===next.name))throw Error('该变量已在面板中，不能重复添加');
+          if(next.name!==item.name){
+            const nextLayout=b.layout?validateLayout(b.layout):structuredClone(layout);if(nextLayout.widgets[item.name]){nextLayout.widgets[next.name]={...nextLayout.widgets[item.name]};delete nextLayout.widgets[item.name];}layout=nextLayout;
+            items=items.map(other=>other===item?next:other);excluded.add(item.name);excluded.delete(next.name);activeRoots=activeRoots.map(name=>name===item.name?next.name:name);sampleCursor=0;
+            for(const name of values.keys())if(name===next.name||[next.name+'.',next.name+'[',next.name+'->'].some(prefix=>name.startsWith(prefix)))values.delete(name);
+          }
         }else if(path==='/api/display'){
           if(typeof b.hex!=='boolean')throw Error('十六进制显示设置无效');
           const item=items.find(v=>v.name===b.root);
@@ -255,11 +291,11 @@ const server=http.createServer(async(req,res)=>{
         if(!['/api/priority','/api/sessions','/api/data/save','/api/data/restore'].includes(path))await save();res.setHeader('Content-Type','application/json');res.end(JSON.stringify(snapshot()));
       }finally{busy=false;}return;
     }
-    const files={'/':'index.html','/app.js':'app.js','/controls.js':'controls.js','/format.js':'format.js','/saved-data.js':'saved-data.js','/updates.js':'updates.js','/layout.js':'layout.js','/editor.js':'editor.js','/search.js':'search.js','/style.css':'style.css','/keil.ico':'keil.ico','/preferences.js':'preferences.js','/session-picker.js':'session-picker.js','/member-picker.js':'member-picker.js','/notices.js':'notices.js'};if(req.method!=='GET'||!files[path]){res.writeHead(404);return res.end();}
+    const files={'/':'index.html','/app.js':'app.js','/controls.js':'controls.js','/format.js':'format.js','/saved-data.js':'saved-data.js','/updates.js':'updates.js','/indices.js':'indices.js','/debug-view.js':'debug-view.js','/layout.js':'layout.js','/editor.js':'editor.js','/search.js':'search.js','/style.css':'style.css','/keil.ico':'keil.ico','/preferences.js':'preferences.js','/session-picker.js':'session-picker.js','/member-picker.js':'member-picker.js','/notices.js':'notices.js'};if(req.method!=='GET'||!files[path]){res.writeHead(404);return res.end();}
     res.setHeader('Content-Type',path.endsWith('.ico')?'image/x-icon':path.endsWith('.js')?'text/javascript':path.endsWith('.css')?'text/css':'text/html; charset=utf-8');res.end(await readFile(new URL('public/'+files[path],root)));
   }catch(e){if(e.variableName&&e.actual)values.set(e.variableName,{...e.actual,updated:Date.now()});res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:e.message}));}
 });
-async function shutdown(){if(shuttingDown)return;cancelDataJob('工具已关闭');shuttingDown=true;updater.close();pool.close();server.close();try{const saved=JSON.parse(await readFile(runtime,'utf8'));if(saved.token===shutdownToken)await unlink(runtime);}catch{}console.log('Keil Debug Assistant stopped.');}
+async function shutdown(){if(shuttingDown)return;cancelDebugJob('工具已关闭');cancelDataJob('工具已关闭');shuttingDown=true;updater.close();pool.close();server.close();try{const saved=JSON.parse(await readFile(runtime,'utf8'));if(saved.token===shutdownToken)await unlink(runtime);}catch{}console.log('Keil Debug Assistant stopped.');}
 process.on('SIGINT',()=>void shutdown());process.on('SIGTERM',()=>void shutdown());
 const updater=new Updater({version,userDir:fileURLToPath(userRoot),dataDir:fileURLToPath(dataRoot),blockedReason:()=>mode!=='disconnected'?'手动断开 Keil 后安装，调试继续运行。':Date.now()-lastUIBusyAt<2000?'完成面板编辑后安装。':'当前操作完成后安装。',canInstall:()=>Date.now()-lastUIBusyAt>=2000&&mode==='disconnected'&&!busy&&!updating&&!shuttingDown&&dataJob?.status!=='running',install:async(staged,info)=>{
  if(Date.now()-lastUIBusyAt<2000||mode!=='disconnected'||busy||shuttingDown||updating||dataJob?.status==='running')return false;

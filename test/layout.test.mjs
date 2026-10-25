@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {initialRect,adjustRect} from '../app/public/layout.js';
+import {initialRect,adjustRect,canvasMetrics} from '../app/public/layout.js';
 import {validateLayout} from '../app/lib/layout.mjs';
 test('free layout positions, resize bounds and persistence validation',()=>{
  const a=initialRect(0,1000),b=initialRect(1,1000,true);assert.ok(a.x+a.width<b.x);assert.equal(b.height,560);
@@ -32,4 +32,22 @@ test('changing debug sessions discards the old layout edit and loads the new pro
  const controller=createLayout({container,onMode(){},onError(error){throw error;},save:()=>new Promise(resolve=>{complete=resolve;})});
  controller.sync({mode:'free',widgets:{old:{x:80,y:40,width:400,height:300}}});controller.toggle();
  const next={mode:'free',widgets:{next:{x:16,y:24,width:600,height:200}}};controller.replace(next);controller.sync(next);assert.deepEqual(controller.capture(),next);complete();await Promise.resolve();
+});
+
+test('free-layout canvas centers after sidebar resizing, without changing saved geometry or adding overflow',()=>{
+ const rects=[{x:0,y:0,width:382,height:560},{x:400,y:0,width:382,height:290}];
+ assert.equal(canvasMetrics(rects,1000).offset,109);assert.equal(canvasMetrics(rects,1200).offset,209);
+ assert.equal(canvasMetrics(rects,600).offset,0);assert.equal(canvasMetrics(rects,600).width,782);
+ const saved=JSON.stringify(rects);canvasMetrics(rects,1600);assert.equal(JSON.stringify(rects),saved);
+});
+
+test('resizing updates actual card positions immediately and capture retains the original coordinates',()=>{
+ const previousDocument=globalThis.document;globalThis.document={createElement:()=>({setAttribute(){}})};
+ try{
+  const saved={mode:'free',widgets:{pid:{x:0,y:0,width:382,height:560},angle:{x:400,y:0,width:382,height:290}}};let saves=0;
+  const card=name=>({dataset:{root:name},style:{},isConnected:true,classList:{contains(){return false;}},append(){},querySelector:selector=>selector==='.card-head'?{prepend(){}}:{}}),cards=[card('pid'),card('angle')];
+  const container={querySelectorAll:()=>cards,dataset:{},style:{},parentElement:{clientWidth:1000},classList:{toggle(){}}};
+  const layout=createLayout({container,save:async()=>{saves++;},onMode(){},onError(error){throw error;}});layout.sync(saved);assert.equal(cards[0].style.left,'109px');
+  container.parentElement.clientWidth=1200;layout.resize();assert.equal(cards[0].style.left,'209px');assert.equal(cards[1].style.left,'609px');assert.equal(container.style.width,'1200px');assert.deepEqual(layout.capture(),saved);assert.equal(saves,0);
+ }finally{globalThis.document=previousDocument;}
 });

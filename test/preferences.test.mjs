@@ -34,3 +34,10 @@ test('tutorial dismissal is immediate, persists separately from folding and can 
  const reloaded=createPreferenceController({save:async patch=>remote=preferences({...remote,...patch})});reloaded.reconcile(JSON.parse(JSON.stringify(remote)));assert.equal(reloaded.current.guideDismissed,true);
  reloaded.set({guideOpen:true,guideDismissed:false});assert.equal(reloaded.current.guideOpen,true);assert.equal(reloaded.current.guideDismissed,false);await nextTurn();assert.equal(remote.guideDismissed,false);
 });
+
+test('top settings collapse is remembered independently and does not reset sidebar or tutorial preferences',async()=>{
+ let remote=preferences({collapsed:true,guideDismissed:true});const controller=createPreferenceController({save:async patch=>remote=preferences({...remote,...patch})});controller.reconcile(remote);
+ controller.set({chromeCollapsed:true});assert.equal(controller.current.chromeCollapsed,true);assert.equal(controller.current.collapsed,true);await nextTurn();
+ const loaded=preferences(JSON.parse(JSON.stringify(remote)));assert.equal(loaded.chromeCollapsed,true);assert.equal(loaded.guideDismissed,true);
+ controller.set({chromeCollapsed:false});await nextTurn();assert.equal(controller.current.chromeCollapsed,undefined);assert.equal(controller.current.collapsed,true);
+});
