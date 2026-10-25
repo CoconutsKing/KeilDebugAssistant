@@ -3,14 +3,19 @@ export function initialRect(index,containerWidth,group=false){const columns=Math
 export function adjustRect(rect,dx,dy,resize=false){return resize?{...rect,width:Math.max(280,Math.min(4000,snap(rect.width+dx))),height:Math.max(180,Math.min(10000,snap(rect.height+dy)))}:{...rect,x:Math.max(0,Math.min(20000,snap(rect.x+dx))),y:Math.max(0,Math.min(20000,snap(rect.y+dy)))};}
 export function canvasMetrics(rects,width,origin={x:0,y:0}){const right=Math.max(0,...rects.map(r=>r.x-origin.x+r.width));return {width:Math.max(width,right),contentWidth:right,offset:Math.max(0,(width-right)/2),height:Math.max(280,...rects.map(r=>r.y-origin.y+r.height+24))};}
 export function createLayout({container,save,onError,onMode}){
- let layout={mode:'grid',widgets:{}},editing=false,drag=null,dirty=false,saving=false,saveAgain=false,origin={x:0,y:0},offset=0,frozenOffset=0;const bindings=new Map();
+ let layout={mode:'grid',widgets:{}},editing=false,drag=null,dirty=false,saving=false,saveAgain=false,origin={x:0,y:0},offset=0;const bindings=new Map();
  function cards(){return [...container.querySelectorAll('.card')];}
  function availableWidth(){const parent=container.parentElement;if(!parent)return 0;const style=typeof getComputedStyle==='function'?getComputedStyle(parent):null;return Math.max(0,parent.clientWidth-(parseFloat(style?.paddingLeft)||0)-(parseFloat(style?.paddingRight)||0));}
  function ensure(){cards().forEach((card,index)=>{const name=card.dataset.root;if(!layout.widgets[name])layout.widgets[name]=initialRect(index,availableWidth(),card.classList.contains('group-card'));});}
  function apply(){container.classList.toggle('free-layout',layout.mode==='free');container.classList.toggle('layout-editing',editing);for(const card of cards()){const body=card.querySelector('.widget-body');if(body)body.inert=editing;}if(layout.mode!=='free'){offset=0;container.style.height='';container.style.width='';for(const card of cards())for(const property of ['left','top','width','height'])card.style[property]='';return;}
-  ensure();const metrics=canvasMetrics(cards().map(card=>layout.widgets[card.dataset.root]),availableWidth(),origin);offset=editing?frozenOffset:metrics.offset;
+  ensure();const metrics=canvasMetrics(cards().map(card=>layout.widgets[card.dataset.root]),availableWidth(),origin);offset=layout.placement==='canvas'?0:metrics.offset;
   container.style.width=Math.max(metrics.width,metrics.contentWidth+offset)+'px';container.style.height=metrics.height+'px';
   for(const card of cards()){const rect=layout.widgets[card.dataset.root];Object.assign(card.style,{left:rect.x-origin.x+offset+'px',top:rect.y-origin.y+'px',width:rect.width+'px',height:rect.height+'px'});}
+ }
+ function canvasLayout(){
+  const captured=structuredClone(layout),visible=cards();captured.mode='free';captured.placement='canvas';if(!visible.length)return captured;const base=container.getBoundingClientRect();
+  for(const card of visible){const rect=card.getBoundingClientRect();captured.widgets[card.dataset.root]={x:Math.max(0,Math.min(20000,rect.left-base.left)),y:Math.max(0,Math.min(20000,rect.top-base.top)),width:Math.max(280,Math.min(4000,rect.width)),height:Math.max(180,Math.min(10000,rect.height))};}
+  return captured;
  }
  async function persist(){dirty=true;if(saving){saveAgain=true;return;}saving=true;try{do{saveAgain=false;await save(structuredClone(layout));}while(saveAgain);dirty=false;}catch(e){onError(e);}finally{saving=false;}}
  function begin(event,card,resize){if(!editing||event.button!==0)return;event.preventDefault();const handle=event.currentTarget;drag={card,resize,start:layout.widgets[card.dataset.root],x:event.clientX,y:event.clientY,handle};handle.setPointerCapture(event.pointerId);card.classList.add('layout-dragging');}
@@ -21,8 +26,8 @@ export function createLayout({container,save,onError,onMode}){
   bindings.set(card,true);
  }
  let lastWidth=availableWidth();if(typeof ResizeObserver!=='undefined'){const observer=new ResizeObserver(()=>{const width=availableWidth();if(width!==lastWidth){lastWidth=width;apply();}});observer.observe(container.parentElement);}
- return {resize(){apply();},replace(saved){drag=null;dirty=false;saveAgain=false;editing=false;offset=frozenOffset=0;origin={x:0,y:0};layout=structuredClone(saved||{mode:'grid',widgets:{}});},capture(){const captured=structuredClone(layout);if(captured.mode!=='free'){captured.mode='free';const base=container.getBoundingClientRect();for(const card of cards()){const rect=card.getBoundingClientRect();captured.widgets[card.dataset.root]={x:Math.max(0,rect.left-base.left),y:Math.max(0,rect.top-base.top),width:Math.max(280,rect.width),height:Math.max(180,rect.height)};}}return captured;},sync(saved){if(!drag&&!dirty&&saved)layout=structuredClone(saved);cards().forEach(bind);for(const card of bindings.keys())if(!card.isConnected)bindings.delete(card);if(!drag&&layout.mode==='free'){ensure();const rects=cards().map(c=>layout.widgets[c.dataset.root]);origin={x:Math.min(0,...rects.map(r=>r.x)),y:Math.min(...rects.map(r=>r.y),0)};
+ return {resize(){apply();},replace(saved){drag=null;dirty=false;saveAgain=false;editing=false;offset=0;origin={x:0,y:0};layout=structuredClone(saved||{mode:'grid',widgets:{}});},capture(){return layout.mode==='free'?structuredClone(layout):canvasLayout();},sync(saved){if(!drag&&!dirty&&saved)layout=structuredClone(saved);cards().forEach(bind);for(const card of bindings.keys())if(!card.isConnected)bindings.delete(card);if(!drag&&layout.mode==='free'){ensure();const rects=cards().map(c=>layout.widgets[c.dataset.root]);origin={x:0,y:0};
     // A filtered view starts at its first remaining widget rather than a large empty canvas.
-    if(container.dataset.filtered==='true'&&rects.length)origin={x:Math.min(...rects.map(r=>r.x)),y:Math.min(...rects.map(r=>r.y))};
-   }apply();onMode(editing,layout.mode);},toggle(){frozenOffset=offset;editing=!editing;if(editing){layout.mode='free';ensure();}apply();onMode(editing,layout.mode);void persist();},reset(){editing=false;offset=frozenOffset=0;layout={mode:'grid',widgets:{}};apply();onMode(false,'grid');void persist();}};
+    if(layout.placement!=='canvas'&&container.dataset.filtered==='true'&&rects.length)origin={x:Math.min(...rects.map(r=>r.x)),y:Math.min(...rects.map(r=>r.y))};
+   }apply();onMode(editing,layout.mode);},toggle(){if(!editing){if(layout.placement!=='canvas')layout=canvasLayout();origin={x:0,y:0};}editing=!editing;apply();onMode(editing,layout.mode);void persist();},reset(){editing=false;offset=0;origin={x:0,y:0};layout={mode:'grid',widgets:{}};apply();onMode(false,'grid');void persist();}};
 }

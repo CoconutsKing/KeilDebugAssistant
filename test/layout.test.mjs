@@ -15,7 +15,7 @@ test('replacing a variable captures grid geometry independently of member count'
  const container={querySelectorAll:()=>[card('pid',{left:420,top:180,width:600,height:550}),card('angle',{left:1040,top:180,width:300,height:550})],getBoundingClientRect:()=>({left:400,top:100})};
  const controller=createLayout({container});
  const captured=controller.capture();
- assert.deepEqual(captured,{mode:'free',widgets:{pid:{x:20,y:80,width:600,height:550},angle:{x:640,y:80,width:300,height:550}}});
+ assert.deepEqual(captured,{mode:'free',placement:'canvas',widgets:{pid:{x:20,y:80,width:600,height:550},angle:{x:640,y:80,width:300,height:550}}});
  captured.widgets.replacement=captured.widgets.pid;delete captured.widgets.pid;
  assert.deepEqual(validateLayout(captured).widgets.replacement,{x:20,y:80,width:600,height:550});
 });
@@ -50,4 +50,39 @@ test('resizing updates actual card positions immediately and capture retains the
   const layout=createLayout({container,save:async()=>{saves++;},onMode(){},onError(error){throw error;}});layout.sync(saved);assert.equal(cards[0].style.left,'109px');
   container.parentElement.clientWidth=1200;layout.resize();assert.equal(cards[0].style.left,'209px');assert.equal(cards[1].style.left,'609px');assert.equal(container.style.width,'1200px');assert.deepEqual(layout.capture(),saved);assert.equal(saves,0);
  }finally{globalThis.document=previousDocument;}
+});
+
+function layoutFixture(saved,width=2000){
+ const previousDocument=globalThis.document,saves=[];globalThis.document={createElement:()=>({setAttribute(){},setPointerCapture(){},hasPointerCapture(){return true;},releasePointerCapture(){}})};
+ const cards=Object.keys(saved.widgets).map(name=>{const handles=[],card={dataset:{root:name},style:{},handles,isConnected:true,classList:{contains(){return false;},add(){},remove(){}},append:handle=>handles.push(handle),querySelector:selector=>selector==='.card-head'?{prepend:handle=>handles.unshift(handle)}:{},getBoundingClientRect(){return {left:100+parseFloat(this.style.left||0),top:80+parseFloat(this.style.top||0),width:parseFloat(this.style.width||382),height:parseFloat(this.style.height||290)};}};return card;});
+ const container={querySelectorAll:()=>cards,dataset:{},style:{},parentElement:{clientWidth:width},classList:{toggle(){}},getBoundingClientRect:()=>({left:100,top:80})};
+ const controller=createLayout({container,save:async value=>saves.push(value),onMode(){},onError(error){throw error;}});controller.sync(saved);
+ return {controller,cards,container,saves,restore(){globalThis.document=previousDocument;}};
+}
+
+test('a centered legacy layout becomes editable across the entire canvas without jumping or snapping back after save',async()=>{
+ const fixture=layoutFixture({mode:'free',widgets:{pid:{x:0,y:0,width:382,height:560},angle:{x:400,y:0,width:382,height:290}}});
+ try{
+  const {controller,cards,container}=fixture;assert.equal(cards[0].style.left,'609px');const initial=cards.map(card=>({...card.style}));controller.toggle();assert.deepEqual(cards.map(card=>({...card.style})),initial);assert.equal(controller.capture().placement,'canvas');
+  const handle=cards[0].handles[0];handle.onpointerdown({button:0,preventDefault(){},currentTarget:handle,clientX:659,clientY:100,pointerId:1});handle.onpointermove({clientX:50,clientY:100});assert.equal(cards[0].style.left,'0px');handle.onpointerup({pointerId:1});
+  controller.toggle();assert.equal(cards[0].style.left,'0px');container.parentElement.clientWidth=2400;controller.resize();assert.equal(cards[0].style.left,'0px');assert.equal(cards[1].style.left,'1009px');
+  const saved=validateLayout(controller.capture());assert.equal(saved.widgets.pid.x,0);assert.equal(saved.widgets.pid.width,382);assert.equal(saved.widgets.pid.height,560);assert.equal(saved.placement,'canvas');controller.replace(saved);controller.sync(saved);assert.equal(cards[0].style.left,'0px');assert.equal(cards[1].style.left,'1009px');
+  await Promise.resolve();assert.ok(fixture.saves.every(value=>value.placement==='canvas'));
+ }finally{fixture.restore();}
+});
+
+test('keyboard movement reaches the left edge and sidebar changes during editing keep the saved canvas positions',()=>{
+ const fixture=layoutFixture({mode:'free',widgets:{pid:{x:0,y:0,width:382,height:290}}},1200);
+ try{
+  const {controller,cards,container}=fixture;controller.toggle();const handle=cards[0].handles[0];for(let i=0;i<60;i++)handle.onkeydown({key:'ArrowLeft',preventDefault(){}});assert.equal(cards[0].style.left,'0px');
+  container.parentElement.clientWidth=1600;controller.resize();assert.equal(cards[0].style.left,'0px');handle.onkeydown({key:'ArrowRight',preventDefault(){}});assert.equal(cards[0].style.left,'8px');controller.toggle();assert.equal(cards[0].style.left,'8px');
+ }finally{fixture.restore();}
+});
+
+test('manual positioning survives filtering and new member content, while automatic layout can still be restored',()=>{
+ const saved={mode:'free',placement:'canvas',widgets:{pid:{x:600,y:40,width:382,height:560},angle:{x:0,y:0,width:382,height:290}}},fixture=layoutFixture(saved,2000);
+ try{
+  const {controller,cards,container}=fixture;container.dataset.filtered='true';const hidden=cards.pop();controller.sync(saved);assert.equal(cards[0].style.left,'600px');assert.equal(cards[0].style.top,'40px');assert.deepEqual(controller.capture(),saved);cards.push(hidden);container.dataset.filtered='false';controller.sync(saved);assert.equal(cards[1].style.left,'0px');
+  controller.reset();assert.deepEqual(fixture.saves.at(-1),{mode:'grid',widgets:{}});assert.throws(()=>validateLayout({...saved,placement:'unknown'}));
+ }finally{fixture.restore();}
 });
