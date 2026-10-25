@@ -45,3 +45,15 @@ const dwarf=`
 test('DWARF catalog resolves dimensions, typedef qualifiers, forward class declarations and pointers',()=>{
  const c=parseDwarf(dwarf);assert.deepEqual(c.variables.map(v=>v.name),['matrix','object']);assert.equal(c.describe('matrix').count,3);assert.equal(c.describe('matrix[1]').count,2);assert.equal(c.describe('matrix[1][0]').type,'float');assert.equal(c.describe('matrix[3]'),null);assert.equal(c.children('object').members[0].name,'object.gain');assert.equal(c.children('object.next').members[0].name,'object.next->gain');assert.equal(c.describe('object.next->gain').type,'float');assert.equal(c.describe('object.missing'),null);
 });
+test('DWARF union metadata prevents copying overlapping storage as independent aggregate members',()=>{
+ const c=parseDwarf(dwarf+`\n <1><c0>: Abbrev Number: 2 (DW_TAG_variable)
+ DW_AT_name : overlapping
+ DW_AT_type : <0xd0>
+ DW_AT_location : (DW_OP_addr: 20000200)
+ <1><d0>: Abbrev Number: 6 (DW_TAG_union_type)
+ DW_AT_name : Storage
+ <2><d1>: Abbrev Number: 7 (DW_TAG_member)
+ DW_AT_name : value
+ DW_AT_type : <0x60>
+ `);assert.equal(c.describe('overlapping').union,true);assert.equal(c.describe('overlapping').aggregate,true);
+});

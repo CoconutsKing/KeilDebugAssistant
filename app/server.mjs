@@ -15,6 +15,7 @@ import {isIntegerVariable} from './public/format.js';
 import {dataRows,restorableValue,validateSavedRecord,savedRecords,restoreRows,sameTargetType} from './lib/saved-data.mjs';
 import {matchesTarget} from './lib/uvsock.mjs';
 import {arrayAxes,reindexItem} from './lib/array-index.mjs';
+import {initializerPlan,cppInitializer,cppNumber} from './lib/array-copy.mjs';
 import {validateItem,validateWrite,watchNames,validName,memberPath} from './lib/model.mjs';
 const root=new URL('./',import.meta.url),home=new URL('../',root),userRoot=process.env.KDA_USER_DIR?pathToFileURL(resolve(process.env.KDA_USER_DIR)+'/'):new URL('userdata/',home),dataRoot=process.env.KDA_DATA_DIR?pathToFileURL(resolve(process.env.KDA_DATA_DIR)+'/'):new URL('data/',home),config=new URL('panel.json',userRoot);
 await mkdir(userRoot,{recursive:true});await mkdir(dataRoot,{recursive:true});
@@ -27,7 +28,7 @@ let defaults={min:0,max:100,step:1,pinned:true},excluded=new Set(),groupPlans=ne
 let activeRoots=[],sampleRound=0;
 let layout={mode:'grid',widgets:{}};
 let writeHistory={};
-let savedData=savedRecords(),dataJob=null,debugJob=null;
+let savedData=savedRecords(),dataJob=null,debugJob=null,copyJob=null;
 function historyScope(){return projectPath||'keil';}
 function historyFor(name){const history=writeHistory[historyScope()]?.[name];return validHistory(history)?history:null;}
 function rememberHistory(name,history){if(!validHistory(history))return;const scope=historyScope();if(!Object.hasOwn(writeHistory,scope))writeHistory[scope]={};Object.defineProperty(writeHistory[scope],name,{value:history,writable:true,enumerable:true,configurable:true});}
@@ -53,7 +54,32 @@ function save(){
 function savedInfo(name){const record=savedData[name];return record?{count:record.values.length,savedAt:record.savedAt}:null;}
 function dataSource(){return projectPath?resolve(projectPath).replace(/\\/g,'/').toLowerCase():'';}
 function jobInfo(){if(!dataJob||dataJob.sessionKey!==sessionKey)return null;const {id,root,sessionKey:scope,action,phase,status,total,completed,checked,attempted,error,started,finished}=dataJob;return {id,root,sessionKey:scope,action,phase,status,total,completed,checked,attempted,error,started,finished};}
-function cancelDataJob(message){if(dataJob?.status==='running'){dataJob.status='cancelled';dataJob.error=message+(dataJob.action==='restore'?'；已开始的写入可能已生效，请检查实际值':'；上次保存的数据仍保留');dataJob.finished=Date.now();}}
+function cancelDataJob(message){cancelArrayCopy(message);if(dataJob?.status==='running'){dataJob.status='cancelled';dataJob.error=message+(dataJob.action==='restore'?'；已开始的写入可能已生效，请检查实际值':'；上次保存的数据仍保留');dataJob.finished=Date.now();}}
+function copyJobInfo(){if(!copyJob||copyJob.sessionId!==sessionId||copyJob.sessionKey!==sessionKey)return null;const {id,root,name,status,total,completed,error,started,finished}=copyJob;return {id,root,name,status,total,completed,error,started,finished};}
+function cancelArrayCopy(message){if(copyJob?.status==='running'){copyJob.status='cancelled';copyJob.error=message+'；本次未生成复制数据';copyJob.finished=Date.now();copyJob.captured.clear();}}
+function copyContext(job){return job===copyJob&&job.sessionId===sessionId&&job.sessionKey===sessionKey&&job.source===dataSource()&&job.epoch===connectionEpoch&&items.some(item=>item.name===job.root);}
+function assertArrayCopy(job){if(!copyContext(job)||job.status!=='running'||mode!=='keil'||shuttingDown||catalog?.key!==job.catalogKey)throw Error('连接、数组或工程类型已改变，复制已停止');}
+async function startArrayCopy(request){
+ if(copyJob?.status==='running'||dataJob?.status==='running'||debugJob?.status==='running')throw Error('另一个读取或调试操作正在进行，请等待完成');
+ if(mode!=='keil'||!client||!['running','halted'].includes(status))throw Error('请先连接 Keil 并进入 Debug 模式');
+ const epoch=connectionEpoch,context=sessionId;await refreshCatalog(true);if(epoch!==connectionEpoch||context!==sessionId||mode!=='keil')throw Error('连接已切换，请刷新后重试');
+ const item=items.find(item=>item.name===request.root);if(!item)throw Error('变量已被移除');
+ const candidates=[item.name,...arrayAxes(item.name,path=>catalog?.describe(path)).map(axis=>axis.parent)];if(!candidates.includes(request.name))throw Error('复制范围不属于此组件');
+ const plan=initializerPlan(request.name,catalog);
+ copyJob={id:randomUUID(),root:item.name,name:request.name,...plan,source:dataSource(),catalogKey:catalog?.key,sessionId,sessionKey,epoch,status:'running',total:plan.rows.length,completed:0,captured:new Map(),error:'',started:Date.now()};
+ const job=copyJob;setTimeout(()=>void runArrayCopy(job),0);
+}
+async function runArrayCopy(job){
+ if(job!==copyJob||job.status!=='running'||shuttingDown)return;if(busy){setTimeout(()=>void runArrayCopy(job),25);return;}busy=true;
+ try{
+  assertArrayCopy(job);const target=client;await target.status();assertArrayCopy(job);const deadline=Date.now()+150;
+  for(let i=0;i<4&&Date.now()<deadline&&job.completed<job.total;i++){
+   const row=job.rows[job.completed];const actual=await target.read(row.name);assertArrayCopy(job);cppNumber(actual);job.captured.set(row.name,actual);job.completed++;
+  }
+  if(job.completed===job.total){assertArrayCopy(job);job.text=cppInitializer(job.tree,job.captured);job.status='done';job.finished=Date.now();job.captured.clear();}
+ }catch(e){if(job.status==='running'){job.status='error';job.error=e.message+'；本次未生成复制数据';job.finished=Date.now();job.captured.clear();}}
+ finally{busy=false;if(job===copyJob&&job.status==='running')setTimeout(()=>void runArrayCopy(job),50);}
+}
 function groupData(root){
  const item=items.find(v=>v.name===root),plan=item&&planFor(root);if(!item||!plan.group)throw Error('请选择已添加的数组或结构体组件');
  const rows=dataRows(rowsFor(item)),meta=catalog?.describe(root);if(!rows.length)throw Error('当前没有选中可保存的数值成员');
@@ -65,6 +91,7 @@ function assertDataJob(job){
  if(groupData(job.root).signature!==job.signature)throw Error('组件成员、类型或范围已改变，操作已停止');
 }
 async function startDataJob(action,root){
+ if(copyJob?.status==='running')throw Error('正在读取复制数据，请等待完成或取消');
  if(dataJob?.status==='running')throw Error('另一个组件正在保存或恢复数据，请等待完成');
  if(mode!=='keil'||!client||!['running','halted'].includes(status))throw Error('请先连接 Keil 并进入 Debug 模式');
  const epoch=connectionEpoch,context=sessionId;await refreshCatalog(true);if(epoch!==connectionEpoch||context!==sessionId||mode!=='keil'||!client)throw Error('连接已切换，请刷新后重试');const group=groupData(root),source=dataSource();
@@ -117,6 +144,7 @@ function debugInfo(){if(!debugJob)return null;const {id,port,project,status,phas
 function cancelDebugJob(message){if(debugJob?.status==='running'){const job=debugJob;job.status='cancelled';job.error=message;job.finished=Date.now();const error=Error(message);job.controller.abort(error);job.client?.close(error);}}
 function assertDebugJob(job){if(job!==debugJob||job.status!=='running'||job.epoch!==connectionEpoch||mode!=='keil'||shuttingDown)throw Error('连接或所选窗口已改变，已停止后续调试指令');}
 function startDebugJob(request){
+ if(copyJob?.status==='running')throw Error('正在读取复制数据，请等待完成或取消');
  if(request.sessionId!==sessionId||request.sessionKey!==sessionKey)throw Error('调试窗口已切换，请刷新后重试');
  if(debugJob?.status==='running')return;
  if(dataJob?.status==='running')throw Error('正在保存或恢复参数，请等待完成');
@@ -151,7 +179,7 @@ async function poll(){if(shuttingDown)return;if(busy||updating||debugJob?.status
   }
 }catch(e){if(epoch===connectionEpoch){lastError=e.message;status='error';}}finally{busy=false;setTimeout(poll,interval);}}
 let keilPort=4823;
-function snapshot(){return {version,update:updater.snapshot(),preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,dataJob:jobInfo(),debugJob:debugInfo(),compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name),rows=rowsFor(v);return {...v,...values.get(v.name),...(plan.group?{...(catalog?.describe(v.name)||{}),value:'',editable:false,children:rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),totalMembers:plan.rows.length,missingMembers:v.visibleMembers?.filter(name=>!rows.some(row=>row.name===name))||[],truncated:plan.truncated}:{}),name:v.name,indices:arrayAxes(v.name,path=>catalog?.describe(path)),history:historyFor(v.name),savedData:savedInfo(v.name)};})};}
+function snapshot(){return {version,update:updater.snapshot(),preferences:prefs,sessionKey,sessionId,selection,session:sessionInfo,sessions:pool.sessions,sessionError:pool.error,discovering:pool.discovering,sessionScanMs:pool.scanMs,mode,status,lastError,defaults,layout,dataJob:jobInfo(),debugJob:debugInfo(),copyJob:copyJobInfo(),compatibility:client?.compatibility||'',catalogError,catalogBinary:catalog?.binary||'',interval,projectPath,busy,items:items.map(v=>{const plan=planFor(v.name),rows=rowsFor(v);return {...v,...values.get(v.name),...(plan.group?{...(catalog?.describe(v.name)||{}),value:'',editable:false,children:rows.map(row=>({...row,...values.get(row.name),...{min:v.min,max:v.max,step:v.step},...v.members?.[row.name],name:row.name,history:historyFor(row.name)})),totalMembers:plan.rows.length,missingMembers:v.visibleMembers?.filter(name=>!rows.some(row=>row.name===name))||[],truncated:plan.truncated}:{}),name:v.name,indices:arrayAxes(v.name,path=>catalog?.describe(path)),history:historyFor(v.name),savedData:savedInfo(v.name)};})};}
 async function body(req){let data='';for await(const chunk of req){data+=chunk;if(data.length>1024*1024)throw Error('请求过大');}return JSON.parse(data||'{}');}
 const server=http.createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');
@@ -161,6 +189,11 @@ const server=http.createServer(async(req,res)=>{
     if(host!==expected||req.headers.origin&&req.headers.origin!==`http://${expected}`||req.headers['sec-fetch-site']==='cross-site'){res.writeHead(403);res.end();return;}
     const path=new URL(req.url,`http://${expected}`).pathname;
     if(req.method==='GET'&&path==='/api/state'){if(req.headers['x-keil-ui-editing']==='1')lastUIBusyAt=Date.now();res.setHeader('Content-Type','application/json');return res.end(JSON.stringify(snapshot()));}
+    if(req.method==='GET'&&path==='/api/array-copy/result'){
+      const query=new URL(req.url,`http://${expected}`).searchParams;
+      if(!copyJob||query.get('id')!==copyJob.id||query.get('sessionId')!==sessionId||query.get('sessionKey')!==sessionKey||!copyContext(copyJob)||copyJob.status!=='done')throw Error('复制结果尚未就绪或数组已切换，请重新复制');
+      res.setHeader('Content-Type','application/json');return res.end(JSON.stringify({text:copyJob.text,total:copyJob.total,name:copyJob.name}));
+    }
     if(req.method==='POST'&&path.startsWith('/api/')){
       if(req.headers['x-keil-client']!=='1')throw Error('缺少客户端标识');
       const b=await body(req);
@@ -179,6 +212,9 @@ const server=http.createServer(async(req,res)=>{
         res.setHeader('Content-Type','application/json');res.end(JSON.stringify(snapshot()));return;
       }
       if(path==='/api/debug/run'){startDebugJob(b);res.setHeader('Content-Type','application/json');return res.end(JSON.stringify(snapshot()));}
+      if(path==='/api/array-copy/cancel'){
+        if(b.sessionId!==sessionId||b.sessionKey!==sessionKey||b.id!==copyJob?.id)throw Error('复制任务已改变');cancelArrayCopy('已取消读取');res.setHeader('Content-Type','application/json');return res.end(JSON.stringify(snapshot()));
+      }
       if(path==='/api/connect'&&debugJob?.status==='running'){cancelDebugJob('连接设置已改变');connectionEpoch++;}
       if(path==='/api/connect'&&b.mode==='disconnected'){
         cancelDataJob('连接已断开');connectionEpoch++;mode='disconnected';status='disconnected';lastError='';sessionId=randomUUID();
@@ -187,7 +223,7 @@ const server=http.createServer(async(req,res)=>{
       }
       if(busy){interactionRequested=true;res.writeHead(409);return res.end(JSON.stringify({error:'正在采样，请稍后重试'}));}busy=true;interactionRequested=false;
       try{
-        if(['/api/index','/api/items','/api/layout','/api/priority','/api/project','/api/write','/api/toggle','/api/display','/api/selection','/api/group-members','/api/data/save','/api/data/restore'].includes(path)&&b.sessionId!==sessionId)throw Error('调试会话已切换，请等待界面刷新后重试');
+        if(['/api/array-copy','/api/index','/api/items','/api/layout','/api/priority','/api/project','/api/write','/api/toggle','/api/display','/api/selection','/api/group-members','/api/data/save','/api/data/restore'].includes(path)&&b.sessionId!==sessionId)throw Error('调试会话已切换，请等待界面刷新后重试');
         if(path==='/api/connect'){
           if(b.mode!=='keil')throw Error('仅支持连接 Keil 或断开连接');
           if(b.mode==='keil'&&(!Number.isInteger(b.port)||b.port<1||b.port>65535))throw Error('端口无效');
@@ -200,6 +236,8 @@ const server=http.createServer(async(req,res)=>{
           }else{pool.close();client=null;sessionInfo=null;sessionId=randomUUID();values.clear();status='connecting';}
           if(mode==='disconnected')status='disconnected';
         }else if(path==='/api/sessions'){if(mode==='keil')await pool.refresh(Number(b.port)||keilPort,true);else{void pool.scan(true);pool.applyDiscovered(null);}
+        }else if(path==='/api/array-copy'){
+          if(b.sessionKey!==sessionKey)throw Error('调试工程已切换，请刷新后重试');await startArrayCopy(b);
         }else if(path==='/api/data/save'||path==='/api/data/restore'){
           if(b.sessionKey!==sessionKey)throw Error('调试工程已切换，请刷新后重试');
           await startDataJob(path.endsWith('/save')?'save':'restore',b.root);
@@ -279,6 +317,7 @@ const server=http.createServer(async(req,res)=>{
         else if(path==='/api/project'){if(typeof b.path!=='string'||!b.path.toLowerCase().endsWith('.uvoptx'))throw Error('请选择 .uvoptx 文件');await readFile(b.path,'utf8');projectPath=b.path;lastXml='';catalog=null;await syncProject();await refreshCatalog(true);}
         else if(path==='/api/write'||path==='/api/toggle'){
           if(b.sessionKey!==sessionKey||b.sessionId!==sessionId)throw Error('调试会话已切换，请等待界面刷新后重试');
+          if(copyJob?.status==='running'&&copyJob.rows.some(row=>row.name===b.name))throw Error('此成员正在读取复制数据，请等待完成或取消');
           if(dataJob?.status==='running'&&dataJob.rows.some(row=>row.name===b.name))throw Error('此成员正在保存或恢复，请等待完成后再修改');
           const rootItem=items.find(v=>v.name===(b.root||b.name));if(!containsMember(rootItem,b.name))throw Error('该变量不属于当前调参面板');const item={...rootItem,...rootItem.members?.[b.name]},v=values.get(b.name);if(!v?.editable||!v.updated)throw Error('变量未就绪或不可写');
           const toggled=path==='/api/toggle'?toggleTarget(historyFor(b.name)):null,requested=toggled?toggled.value:b.value;
@@ -288,10 +327,10 @@ const server=http.createServer(async(req,res)=>{
           rememberHistory(b.name,toggled?toggled.history:recordInput(historyFor(b.name),requested,before));
         }else if(path==='/api/interval'){if(!Number.isInteger(b.interval)||b.interval<100||b.interval>10000)throw Error('刷新间隔须为 100–10000 ms');interval=b.interval;}
         else throw Error('未知操作');
-        if(!['/api/priority','/api/sessions','/api/data/save','/api/data/restore'].includes(path))await save();res.setHeader('Content-Type','application/json');res.end(JSON.stringify(snapshot()));
+        if(!['/api/array-copy','/api/priority','/api/sessions','/api/data/save','/api/data/restore'].includes(path))await save();res.setHeader('Content-Type','application/json');res.end(JSON.stringify(snapshot()));
       }finally{busy=false;}return;
     }
-    const files={'/':'index.html','/app.js':'app.js','/controls.js':'controls.js','/format.js':'format.js','/saved-data.js':'saved-data.js','/updates.js':'updates.js','/indices.js':'indices.js','/debug-view.js':'debug-view.js','/layout.js':'layout.js','/editor.js':'editor.js','/search.js':'search.js','/style.css':'style.css','/keil.ico':'keil.ico','/preferences.js':'preferences.js','/session-picker.js':'session-picker.js','/member-picker.js':'member-picker.js','/notices.js':'notices.js'};if(req.method!=='GET'||!files[path]){res.writeHead(404);return res.end();}
+    const files={'/':'index.html','/app.js':'app.js','/controls.js':'controls.js','/format.js':'format.js','/saved-data.js':'saved-data.js','/array-copy.js':'array-copy.js','/updates.js':'updates.js','/indices.js':'indices.js','/debug-view.js':'debug-view.js','/layout.js':'layout.js','/editor.js':'editor.js','/search.js':'search.js','/style.css':'style.css','/keil.ico':'keil.ico','/preferences.js':'preferences.js','/session-picker.js':'session-picker.js','/member-picker.js':'member-picker.js','/notices.js':'notices.js'};if(req.method!=='GET'||!files[path]){res.writeHead(404);return res.end();}
     res.setHeader('Content-Type',path.endsWith('.ico')?'image/x-icon':path.endsWith('.js')?'text/javascript':path.endsWith('.css')?'text/css':'text/html; charset=utf-8');res.end(await readFile(new URL('public/'+files[path],root)));
   }catch(e){if(e.variableName&&e.actual)values.set(e.variableName,{...e.actual,updated:Date.now()});res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:e.message}));}
 });

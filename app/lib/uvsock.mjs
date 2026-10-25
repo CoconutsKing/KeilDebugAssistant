@@ -91,7 +91,7 @@ export class UVSock {
     // independently for both polling and write confirmation. Never use a stale
     // Watch value as a successful read when the live evaluation fails.
     const actual=await evaluate();
-    return {...watch,value:actual.value,editable:watch.editable&&actual.editable};
+    return {...watch,value:actual.value,valueType:actual.type,editable:watch.editable&&actual.editable};
   }
   async members(name){
     if(this.legacy)throw Error('当前 Keil 使用兼容接口，不能枚举成员。可直接添加 joints[0].成员；如需展开，请先退出 Debug，让工具连接后再进入 Debug。');

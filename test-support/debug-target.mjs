@@ -24,12 +24,13 @@ export async function createDebugTarget(options={}){
     const finish=()=>{if(!target.runError)target.mode=target.breakpoint?'halted':'running';complete(cmd,target.runError);};later(finish,target.runDelay);continue;
    }
    if(cmd===0x200a||cmd===0x202b){
-    const expression=frame.subarray(48,48+frame.readUInt32LE(44)-1).toString(),[name,literal]=expression.split(' = '),meta=fixtureCatalog.describe(name);command.expression=expression;
+    const catalog=target.catalog||fixtureCatalog,expression=frame.subarray(48,48+frame.readUInt32LE(44)-1).toString(),[name,literal]=expression.split(' = '),meta=catalog.describe(name);command.expression=expression;
+    if(target.failRead===name){acknowledge(cmd,undefined,13);continue;}
     if(target.mode==='waiting'||!meta){acknowledge(cmd,undefined,target.mode==='waiting'?6:13);continue;}
     if(literal!==undefined)target.values.set(name,Math.fround(Number(literal)));
     const initial=name==='pid.kp'?1.2:name==='pid.ki'?0.08:/^controllers\[\d+\]\.gain$/.test(name)?Number(name.match(/\[(\d+)\]/)[1])+0.5:0,value=target.values.get(name)??initial;
     if(cmd===0x200a){const data=Buffer.alloc(12);data.writeUInt32LE(/int/.test(meta.type)?4:10);if(/int/.test(meta.type))data.writeInt32LE(value,4);else data.writeFloatLE(value,4);acknowledge(cmd,data);}
-    else{const data=Buffer.alloc(1060);data.writeInt32LE(1);data.writeInt32LE(meta.count||fixtureCatalog.children(name)?.total||0,8);data.writeUInt32LE(meta.array?0x40:meta.aggregate?0x20:1,16);sstr(String(value)).copy(data,20);sstr(meta.type).copy(data,280);sstr(name).copy(data,540);sstr(name).copy(data,800);acknowledge(cmd,data);}continue;
+    else{const data=Buffer.alloc(1060);data.writeInt32LE(1);data.writeInt32LE(meta.count||catalog.children(name)?.total||0,8);data.writeUInt32LE(meta.array?0x40:meta.aggregate?0x20:1,16);sstr(String(value)).copy(data,20);sstr(meta.type).copy(data,280);sstr(name).copy(data,540);sstr(name).copy(data,800);acknowledge(cmd,data);}continue;
    }
    acknowledge(cmd,undefined,28);
   }});
