@@ -25,7 +25,7 @@ export async function createDebugTarget(options={}){
    }
    if(cmd===0x200a||cmd===0x202b){
     const catalog=target.catalog||fixtureCatalog,expression=frame.subarray(48,48+frame.readUInt32LE(44)-1).toString(),[name,literal]=expression.split(' = '),meta=catalog.describe(name);command.expression=expression;
-    if(target.failRead===name){acknowledge(cmd,undefined,13);continue;}
+    if(target.failRead===name||target.failReads?.includes(name)){acknowledge(cmd,undefined,13);continue;}
     if(target.mode==='waiting'||!meta){acknowledge(cmd,undefined,target.mode==='waiting'?6:13);continue;}
     if(literal!==undefined)target.values.set(name,Math.fround(Number(literal)));
     const initial=name==='pid.kp'?1.2:name==='pid.ki'?0.08:/^controllers\[\d+\]\.gain$/.test(name)?Number(name.match(/\[(\d+)\]/)[1])+0.5:0,value=target.values.get(name)??initial;

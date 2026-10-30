@@ -10,7 +10,7 @@ import {savedDataMessage} from '/saved-data.js';
 import {createUpdates} from '/updates.js';
 import {createIndexControls} from '/indices.js';
 import {debugView} from '/debug-view.js';
-import {arrayCopyOptions,arrayCopyMessage,copyText} from '/array-copy.js';
+import {arrayCopyOptions,arrayCopyMessage,arrayCopyResult,copyText} from '/array-copy.js';
 const $=id=>document.getElementById(id);let state={items:[]},draftSelection=null,onlyPinned=false,editing=null,memberEditing=null,revision=0,connectionError='',serviceError='';
 const labels={disconnected:'未连接',connecting:'正在连接',waiting:'等待 Debug',running:'● 目标运行中',halted:'● 目标已暂停',error:'连接异常 / 重试中'};
 async function api(path,data,{signal}={}){const context=data.sessionId??state.sessionId;revision++;for(let attempt=0;attempt<40;attempt++){signal?.throwIfAborted();const r=await fetch('/api/'+path,{method:'POST',signal,headers:{'Content-Type':'application/json','X-Keil-Client':'1'},body:JSON.stringify({...data,sessionId:context,...(['write','toggle','data/save','data/restore','index','array-copy','array-copy/cancel','debug/run'].includes(path)?{sessionKey:data.sessionKey??state.sessionKey}:{})})});const b=await r.json();signal?.throwIfAborted();if(r.status===409){await new Promise(r=>setTimeout(r,150));continue;}if(!r.ok)throw Error(b.error||'请求失败');revision++;state=b;if(['write','toggle','display','selection','data/save','data/restore','index','array-copy','array-copy/cancel'].includes(path))render();return b;}throw Error('Keil 正忙，请稍后重试');}
@@ -53,7 +53,7 @@ function render(){
    let copyControls=null;
    if(copyOptions.length){
     const bar=element('div','array-copy'),scope=element('select'),button=element('button','','复制 C++ 数组'),cancel=element('button','','取消读取'),message=element('p','array-copy-status');scope.setAttribute('aria-label',v.name+' 复制范围');scope.title='复制所选范围的全部数值，包含未显示的成员';
-    for(const option of copyOptions){const entry=element('option','',option.label);entry.value=option.name;scope.append(entry);}button.type=cancel.type='button';button.setAttribute('aria-label',v.name+' 复制 C++ 数组');button.title='分批读取整个数组，按 C++ 花括号格式复制；运行中的数值可能在读取期间变化';cancel.title='停止后续读取，不修改变量';cancel.hidden=true;
+    for(const option of copyOptions){const entry=element('option','',option.label);entry.value=option.name;scope.append(entry);}button.type=cancel.type='button';button.setAttribute('aria-label',v.name+' 复制 C++ 数组');button.title='复制数字成员为 C++ 指定成员初始化值；跳过指针、非数字及不可读成员，运行中数值可能变化';cancel.title='停止后续读取，不修改变量';cancel.hidden=true;
     button.onclick=()=>void copyArray(v.name,scope.value);cancel.onclick=()=>{if(state.copyJob?.root===v.name)void api('array-copy/cancel',{id:state.copyJob.id}).then(render).catch(error);};message.setAttribute('role','status');bar.append(scope,button,cancel);card.append(bar,message);copyControls={scope,button,cancel,message};
    }
    let dataControls=null;
@@ -64,7 +64,7 @@ function render(){
   const connected=!serviceError&&connectionSwitch.pending===null&&state.mode==='keil'&&['running','halted'].includes(state.status),ownJob=state.dataJob?.status==='running'&&state.dataJob.root===v.name,preparing=dataPending.has(v.name),copying=state.copyJob?.status==='running',ownCopy=copying&&state.copyJob.root===v.name;
   entry.controls.forEach((control,i)=>{const name=rows[i].name,overlap=state.dataJob?.status==='running'&&[state.dataJob.root+'.',state.dataJob.root+'['].some(prefix=>name.startsWith(prefix));control.update({...rows[i],editable:rows[i].editable&&connected&&!(copying&&(name===state.copyJob.name||[state.copyJob.name+'.',state.copyJob.name+'[',state.copyJob.name+'->'].some(prefix=>name.startsWith(prefix))))&&!ownCopy&&!ownJob&&!preparing&&!overlap});});
   entry.indexControls?.update(v.indices||[],indexPending.has(v.name)||state.debugJob?.status==='running'||ownJob||ownCopy||preparing||entry.controls.some(control=>control.busy));entry.indexError.textContent=indexErrors.get(v.name)||'';
-  if(entry.copyControls){const {scope,button,cancel,message}=entry.copyControls,notice=copyMessages.get(v.name)||arrayCopyMessage(v.name,state.copyJob);scope.disabled=ownCopy||copyStarting;button.disabled=!connected||copyStarting||copying||state.dataJob?.status==='running'||dataPending.size>0||indexPending.has(v.name)||entry.controls.some(control=>control.busy);cancel.hidden=!ownCopy;message.textContent=notice.text;message.classList.toggle('data-error',notice.error);}
+  if(entry.copyControls){const {scope,button,cancel,message}=entry.copyControls,notice=copyMessages.get(v.name)||arrayCopyMessage(v.name,state.copyJob);scope.disabled=ownCopy||copyStarting;button.disabled=!connected||copyStarting||copying||state.dataJob?.status==='running'||dataPending.size>0||indexPending.has(v.name)||entry.controls.some(control=>control.busy);cancel.hidden=!ownCopy;message.textContent=notice.text;message.classList.toggle('data-error',notice.error||notice.warning);}
   if(entry.dataControls){const {save,restore,message}=entry.dataControls,working=state.dataJob?.status==='running'||dataPending.size>0||copying||copyStarting,ready=connected&&!!v.children?.length&&!working&&!entry.controls.some(c=>c.busy),notice=savedDataMessage(v,state.dataJob);save.disabled=!ready;restore.disabled=!ready||!v.savedData;message.textContent=dataErrors.get(v.name)||(preparing?'正在准备…':notice.text);message.classList.toggle('data-error',dataErrors.has(v.name)||notice.error);}
   entry.card.querySelector(':scope > .type').textContent=groupType(v,rows);
  }
@@ -84,8 +84,8 @@ async function finishArrayCopy(){
  const current=()=>copyOwner===owner&&owner.sessionId===state.sessionId&&owner.sessionKey===state.sessionKey&&state.items.some(item=>item.name===owner.root);
  try{
   const query=new URLSearchParams({id:owner.id,sessionId:owner.sessionId,sessionKey:owner.sessionKey}),response=await fetch('/api/array-copy/result?'+query),result=await response.json();if(!response.ok)throw Error(result.error||'复制数据读取失败');if(!current())return;
-  const copied=await copyText(result.text,{fallback:text=>{if(!current())return;$('copyText').value=text;$('copyDialogMessage').textContent='浏览器未允许自动复制。点击“复制文本”，或选中文本后按 Ctrl+C。';$('copyDialog').showModal();$('copyText').select();}});if(!current())return;
-  copyMessages.set(owner.root,{text:copied?`已复制 ${result.name}（${result.total} 项）。`:`已读取 ${result.total} 项，请在文本窗口复制。`,error:false});
+  const copied=await copyText(result.text,{fallback:text=>{if(!current())return;$('copyText').value=text;$('copyDialogMessage').textContent='浏览器未允许自动复制。点击“复制文本”，或选中文本后按 Ctrl+C。'+(result.skipped?' 已跳过 '+result.skipped+' 项；省略成员使用默认初始化，数组缺失项保留 {}。':'');$('copyDialog').showModal();$('copyText').select();}});if(!current())return;
+  copyMessages.set(owner.root,arrayCopyResult(result,copied));
  }catch(e){if(current())copyMessages.set(owner.root,{text:e.message,error:true});}finally{if(current()){copyOwner=null;render();}}
 }
 $('copyDialogClose').onclick=()=>$('copyDialog').close();

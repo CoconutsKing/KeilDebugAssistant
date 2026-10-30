@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {initializerPlan,cppInitializer,cppNumber} from '../app/lib/array-copy.mjs';
-import {arrayCopyOptions,arrayCopyMessage,copyText} from '../app/public/array-copy.js';
+import {arrayCopyOptions,arrayCopyMessage,arrayCopyResult,copyText} from '../app/public/array-copy.js';
 
 function arrays(count=3,inner=2){return {
  describe(name){if(name==='matrix')return {array:true,count};if(/^matrix\[\d+\]$/.test(name))return {array:true,count:inner};return /^matrix\[\d+\]\[\d+\]$/.test(name)?{type:'int'}:null;},
@@ -16,7 +16,7 @@ test('array of structures includes nested member arrays in declaration order',()
  const metadata={pid:{array:true,count:2},'pid[0]':{aggregate:true},'pid[1]':{aggregate:true}};
  const catalog={describe:name=>metadata[name]||(/\.gains$/.test(name)?{array:true,count:2}:/\.mode$/.test(name)?{type:'int'}:/\.gains\[\d\]$/.test(name)?{type:'float'}:null),children(name){const members=(name==='pid'?['pid[0]','pid[1]']:/pid\[\d\]$/.test(name)?[name+'.gains',name+'.mode']:[name+'[0]',name+'[1]']).map(name=>({name}));return {members,total:members.length,nextOffset:null};}};
  const plan=initializerPlan('pid',catalog),values=new Map(plan.rows.map((row,i)=>[row.name,{type:row.type,value:String(i)}]));
- assert.equal(cppInitializer(plan.tree,values),'{\n  {\n    {0.0f, 1.0f},\n    2\n  },\n  {\n    {3.0f, 4.0f},\n    5\n  }\n}');
+ assert.equal(cppInitializer(plan.tree,values),'{\n  {\n    .gains = {0.0f, 1.0f},\n    .mode = 2\n  },\n  {\n    .gains = {3.0f, 4.0f},\n    .mode = 5\n  }\n}');
 });
 test('C++ numeric formatting preserves float bits, double precision and exact signed/unsigned 64-bit values',()=>{
  assert.equal(cppNumber({type:'int',value:'0xFF'}),'255');assert.equal(cppNumber({type:'bool',value:'1'}),'1');
@@ -29,13 +29,36 @@ test('C++ numeric formatting preserves float bits, double precision and exact si
 test('incomplete, unsupported and excessively large copies fail instead of emitting partial initializers',()=>{
  assert.throws(()=>initializerPlan('matrix;run()',arrays()));assert.throws(()=>initializerPlan('matrix',arrays(),{maxLeaves:5}),/最多复制/);assert.throws(()=>initializerPlan('matrix',arrays(),{maxDepth:1}),/嵌套/);
  for(const change of [{describe:()=>({pointer:true,type:'pointer'})},{describe:()=>({aggregate:true,union:true})},{children:()=>({members:[{name:'matrix[2]'}],total:3,nextOffset:null})},{children:()=>({members:[],total:3,nextOffset:0})}])assert.throws(()=>initializerPlan('matrix',{...arrays(),...change}));
- assert.throws(()=>cppInitializer(initializerPlan('matrix',arrays()).tree,new Map()),/未读取/);
+ assert.throws(()=>cppInitializer(initializerPlan('matrix',arrays()).tree,new Map()),/没有可复制的数字/);
 });
 test('copy scope includes whole parent arrays, explicit subarrays and current aggregate without duplicates',()=>{
  assert.deepEqual(arrayCopyOptions({name:'matrix[1]',array:true,indices:[{parent:'matrix'},{parent:'matrix[1]'}]}).map(option=>option.name),['matrix[1]','matrix']);
- assert.deepEqual(arrayCopyOptions({name:'pid[1]',children:[],indices:[{parent:'pid'}]}).map(option=>option.name),['pid','pid[1]']);
+ assert.deepEqual(arrayCopyOptions({name:'pid[1]',children:[],indices:[{parent:'pid'}]}).map(option=>option.name),['pid[1]','pid']);
  assert.deepEqual(arrayCopyOptions({name:'scalar'}),[]);assert.deepEqual(arrayCopyOptions({name:'values',array:true,children:[],indices:[{parent:'values'}]}).map(option=>option.name),['values']);
  assert.match(arrayCopyMessage('matrix',{root:'matrix',name:'matrix',status:'running',completed:2,total:6}).text,/2 \/ 6/);assert.equal(arrayCopyMessage('other',{root:'matrix',status:'error',error:'failed'}).text,'');assert.equal(arrayCopyMessage('matrix',{root:'matrix',status:'error',error:'failed'}).error,true);
+});
+
+test('named C++ initialization skips ErrorFilter pointers, unions and nonnumeric members without shifting subsequent fields',()=>{
+ const metadata={pid:{aggregate:true},'pid.Kp':{type:'float'},'pid.ErrorFilter':{pointer:true,type:'pointer'},'pid.Ki':{type:'float'},'pid.overlay':{aggregate:true,union:true},'pid.text':{type:'string'},'pid.Kd':{type:'float'}};
+ const catalog={describe:name=>metadata[name],children(){return {members:Object.keys(metadata).slice(1).map(name=>({name})),total:6,nextOffset:null};}};
+ const plan=initializerPlan('pid',catalog);assert.deepEqual(plan.rows.map(row=>row.name),['pid.Kp','pid.Ki','pid.Kd']);assert.equal(plan.skipped.length,3);
+ const values=new Map([['pid.Kp',{type:'float',value:'1.25'}],['pid.Kd',{type:'float',value:'0.5'}]]);assert.equal(cppInitializer(plan.tree,values),'{.Kp = 1.25f, .Kd = 0.5f}');
+ assert.throws(()=>cppInitializer(plan.tree,new Map([['pid.Kp',{type:'float',value:'NaN'}]])),/没有可复制的数字/);
+ const notice=arrayCopyResult({name:'pid',total:2,skipped:4,skippedNames:['pid.ErrorFilter']});assert.equal(notice.error,false);assert.equal(notice.warning,true);assert.match(notice.text,/已跳过 4 项/);assert.match(notice.text,/ErrorFilter/);assert.match(arrayCopyResult({name:'pid',total:2,skipped:0},false).text,/文本窗口/);
+});
+
+test('unreadable numeric array elements keep their original indices as empty initializers',()=>{
+ const plan=initializerPlan('matrix',arrays(3,2)),values=new Map([['matrix[0][1]',{type:'int',value:'2'}],['matrix[2][0]',{type:'int',value:'5'}]]);
+ assert.equal(cppInitializer(plan.tree,values),'{\n  {{}, 2},\n  {},\n  {5, {}}\n}');
+});
+
+test('exported named members and array holes compile as C++20 aggregate initialization',async t=>{
+ const metadata={pid:{aggregate:true},'pid.Kp':{type:'float'},'pid.ErrorFilter':{pointer:true},'pid.Ki':{type:'float'}};
+ const catalog={describe:name=>metadata[name],children:()=>({members:['pid.Kp','pid.ErrorFilter','pid.Ki'].map(name=>({name})),total:3,nextOffset:null})};
+ const pid=cppInitializer(initializerPlan('pid',catalog).tree,new Map([['pid.Kp',{type:'float',value:'1.25'}],['pid.Ki',{type:'float',value:'0.5'}]]));
+ const matrix=cppInitializer(initializerPlan('matrix',arrays(3,2)).tree,new Map([['matrix[0][1]',{type:'int',value:'2'}],['matrix[2][0]',{type:'int',value:'5'}]]));
+ const source=`struct PID { float Kp; void (*ErrorFilter)(); float Ki; }; constexpr PID pid = ${pid}; constexpr int matrix[3][2] = ${matrix}; static_assert(pid.Kp == 1.25f && pid.Ki == 0.5f && pid.ErrorFilter == nullptr); static_assert(matrix[0][0] == 0 && matrix[0][1] == 2 && matrix[1][0] == 0 && matrix[2][0] == 5 && matrix[2][1] == 0);`;
+ const {execFile}=await import('node:child_process');const compiled=await new Promise((resolve,reject)=>{const child=execFile('g++',['-std=c++20','-pedantic-errors','-x','c++','-fsyntax-only','-'],{windowsHide:true,timeout:10000},(error,out,err)=>error?.code==='ENOENT'?resolve(false):error?reject(Error(err||error.message)):resolve(true));child.stdin.on('error',()=>{});child.stdin.end(source);});if(!compiled)t.skip('g++ not installed');
 });
 test('clipboard failure keeps the complete text for an explicit user copy',async()=>{
  let copied,fallback;const text='{{1, 2}, {3, 4}}';assert.equal(await copyText(text,{clipboard:{writeText:async value=>{copied=value;}}}),true);assert.equal(copied,text);

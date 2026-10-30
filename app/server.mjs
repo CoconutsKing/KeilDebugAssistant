@@ -55,7 +55,7 @@ function savedInfo(name){const record=savedData[name];return record?{count:recor
 function dataSource(){return projectPath?resolve(projectPath).replace(/\\/g,'/').toLowerCase():'';}
 function jobInfo(){if(!dataJob||dataJob.sessionKey!==sessionKey)return null;const {id,root,sessionKey:scope,action,phase,status,total,completed,checked,attempted,error,started,finished}=dataJob;return {id,root,sessionKey:scope,action,phase,status,total,completed,checked,attempted,error,started,finished};}
 function cancelDataJob(message){cancelArrayCopy(message);if(dataJob?.status==='running'){dataJob.status='cancelled';dataJob.error=message+(dataJob.action==='restore'?'；已开始的写入可能已生效，请检查实际值':'；上次保存的数据仍保留');dataJob.finished=Date.now();}}
-function copyJobInfo(){if(!copyJob||copyJob.sessionId!==sessionId||copyJob.sessionKey!==sessionKey)return null;const {id,root,name,status,total,completed,error,started,finished}=copyJob;return {id,root,name,status,total,completed,error,started,finished};}
+function copyJobInfo(){if(!copyJob||copyJob.sessionId!==sessionId||copyJob.sessionKey!==sessionKey)return null;const {id,root,name,status,total,completed,copied,error,started,finished}=copyJob;return {id,root,name,status,total,completed,copied,skipped:copyJob.skipped.length,skippedNames:copyJob.skipped.slice(0,3).map(row=>row.name),error,started,finished};}
 function cancelArrayCopy(message){if(copyJob?.status==='running'){copyJob.status='cancelled';copyJob.error=message+'；本次未生成复制数据';copyJob.finished=Date.now();copyJob.captured.clear();}}
 function copyContext(job){return job===copyJob&&job.sessionId===sessionId&&job.sessionKey===sessionKey&&job.source===dataSource()&&job.epoch===connectionEpoch&&items.some(item=>item.name===job.root);}
 function assertArrayCopy(job){if(!copyContext(job)||job.status!=='running'||mode!=='keil'||shuttingDown||catalog?.key!==job.catalogKey)throw Error('连接、数组或工程类型已改变，复制已停止');}
@@ -66,7 +66,7 @@ async function startArrayCopy(request){
  const item=items.find(item=>item.name===request.root);if(!item)throw Error('变量已被移除');
  const candidates=[item.name,...arrayAxes(item.name,path=>catalog?.describe(path)).map(axis=>axis.parent)];if(!candidates.includes(request.name))throw Error('复制范围不属于此组件');
  const plan=initializerPlan(request.name,catalog);
- copyJob={id:randomUUID(),root:item.name,name:request.name,...plan,source:dataSource(),catalogKey:catalog?.key,sessionId,sessionKey,epoch,status:'running',total:plan.rows.length,completed:0,captured:new Map(),error:'',started:Date.now()};
+ copyJob={id:randomUUID(),root:item.name,name:request.name,...plan,source:dataSource(),catalogKey:catalog?.key,sessionId,sessionKey,epoch,status:'running',total:plan.rows.length,completed:0,copied:0,captured:new Map(),error:'',started:Date.now()};
  const job=copyJob;setTimeout(()=>void runArrayCopy(job),0);
 }
 async function runArrayCopy(job){
@@ -74,7 +74,10 @@ async function runArrayCopy(job){
  try{
   assertArrayCopy(job);const target=client;await target.status();assertArrayCopy(job);const deadline=Date.now()+150;
   for(let i=0;i<4&&Date.now()<deadline&&job.completed<job.total;i++){
-   const row=job.rows[job.completed];const actual=await target.read(row.name);assertArrayCopy(job);cppNumber(actual);job.captured.set(row.name,actual);job.completed++;
+   const row=job.rows[job.completed];
+   try{const actual=await target.read(row.name);assertArrayCopy(job);cppNumber(actual);job.captured.set(row.name,actual);job.copied++;}
+   catch(e){assertArrayCopy(job);if(e.keilStatus===6||target.socket?.destroyed)throw e;job.skipped.push({name:row.name,reason:e.message});}
+   job.completed++;
   }
   if(job.completed===job.total){assertArrayCopy(job);job.text=cppInitializer(job.tree,job.captured);job.status='done';job.finished=Date.now();job.captured.clear();}
  }catch(e){if(job.status==='running'){job.status='error';job.error=e.message+'；本次未生成复制数据';job.finished=Date.now();job.captured.clear();}}
@@ -192,7 +195,7 @@ const server=http.createServer(async(req,res)=>{
     if(req.method==='GET'&&path==='/api/array-copy/result'){
       const query=new URL(req.url,`http://${expected}`).searchParams;
       if(!copyJob||query.get('id')!==copyJob.id||query.get('sessionId')!==sessionId||query.get('sessionKey')!==sessionKey||!copyContext(copyJob)||copyJob.status!=='done')throw Error('复制结果尚未就绪或数组已切换，请重新复制');
-      res.setHeader('Content-Type','application/json');return res.end(JSON.stringify({text:copyJob.text,total:copyJob.total,name:copyJob.name}));
+      res.setHeader('Content-Type','application/json');return res.end(JSON.stringify({text:copyJob.text,total:copyJob.copied,skipped:copyJob.skipped.length,skippedNames:copyJob.skipped.slice(0,3).map(row=>row.name),skippedMembers:copyJob.skipped.slice(0,50),name:copyJob.name}));
     }
     if(req.method==='POST'&&path.startsWith('/api/')){
       if(req.headers['x-keil-client']!=='1')throw Error('缺少客户端标识');
